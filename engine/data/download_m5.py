@@ -23,8 +23,9 @@ class CredentialsMissingError(Exception):
 
 def manual_instructions(dest: Path = DEST) -> str:
     return (
-        "Kaggle API credentials not found (no ~/.kaggle/kaggle.json and no "
-        "KAGGLE_USERNAME/KAGGLE_KEY environment variables).\n\n"
+        "Kaggle API credentials not found (no ~/.kaggle/access_token, no "
+        "~/.kaggle/kaggle.json, and no KAGGLE_API_TOKEN / "
+        "KAGGLE_USERNAME+KAGGLE_KEY environment variables).\n\n"
         "To proceed manually:\n"
         "  1. Go to https://www.kaggle.com/competitions/m5-forecasting-accuracy/data\n"
         "     (sign in, accept the competition rules if prompted).\n"
@@ -42,9 +43,15 @@ def manual_instructions(dest: Path = DEST) -> str:
 
 
 def has_kaggle_credentials() -> bool:
+    if os.environ.get("KAGGLE_API_TOKEN"):
+        return True
     if os.environ.get("KAGGLE_USERNAME") and os.environ.get("KAGGLE_KEY"):
         return True
-    return (Path.home() / ".kaggle" / "kaggle.json").exists()
+    if (Path.home() / ".kaggle" / "kaggle.json").exists():
+        return True
+    if (Path.home() / ".kaggle" / "access_token").exists():
+        return True
+    return (Path.home() / ".kaggle" / "access_token.txt").exists()
 
 
 def download(dest: Path = DEST) -> None:
