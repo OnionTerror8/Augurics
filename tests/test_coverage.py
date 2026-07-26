@@ -1,4 +1,4 @@
-"""Coverage diagnostic tests against a small synthetic panel — no M5 data required."""
+"""Coverage diagnostic tests against small synthetic panels — no M5 data required."""
 from __future__ import annotations
 
 import duckdb
@@ -6,9 +6,14 @@ import pandas as pd
 import pytest
 
 from engine.backtest.coverage import (
+    WITHIN_SPAN_LIFT_THRESHOLD,
+    compute_calendar_field_completeness,
     compute_monthly_coverage,
     compute_monthly_coverage_by_category,
+    compute_within_span_monthly_price_coverage,
+    compute_within_span_price_coverage,
     first_month_reaching,
+    render_addendum,
 )
 
 
@@ -72,3 +77,87 @@ def test_first_month_reaching_returns_none_if_never_sustained():
     )
     monthly.loc[len(monthly)] = ["2020-03", 0.4]
     assert first_month_reaching(monthly, "price_coverage", 0.90) is None
+
+
+def _make_full_panel_db(tmp_path, rows: str, name: str = "full.duckdb"):
+    db_path = tmp_path / name
+    con = duckdb.connect(str(db_path))
+    con.execute(f"""
+        CREATE TABLE panel AS
+        SELECT * FROM (VALUES {rows}) AS t(
+            product_id, location_id, category, ds, y, sell_price,
+            event_name_1, event_type_1, event_name_2, event_type_2, snap
+        )
+    """)
+    con.close()
+    return db_path
+
+
+@pytest.fixture
+def structural_gap_db(tmp_path):
+    """P1's price is only missing BEFORE its first nonzero sale -- structural,
+    should yield 100% within-span coverage."""
+    rows = """
+        ('P1', 'S1', 'FOODS', DATE '2020-01-01', 0.0, NULL, NULL, NULL, NULL, NULL, false),
+        ('P1', 'S1', 'FOODS', DATE '2020-01-02', 0.0, NULL, NULL, NULL, NULL, NULL, true),
+        ('P1', 'S1', 'FOODS', DATE '2020-01-03', 2.0, 5.0, 'NewYear', 'National', NULL, NULL, false),
+        ('P1', 'S1', 'FOODS', DATE '2020-01-04', 1.0, 5.0, NULL, NULL, NULL, NULL, false)
+    """
+    return _make_full_panel_db(tmp_path, rows, "structural.duckdb")
+
+
+@pytest.fixture
+def genuine_gap_db(tmp_path):
+    """P2's price is missing even AFTER its first nonzero sale -- a genuine
+    within-span gap that should NOT be lifted."""
+    rows = """
+        ('P2', 'S1', 'FOODS', DATE '2020-01-01', 3.0, NULL, NULL, NULL, NULL, NULL, false),
+        ('P2', 'S1', 'FOODS', DATE '2020-01-02', 1.0, NULL, NULL, NULL, NULL, NULL, false),
+        ('P2', 'S1', 'FOODS', DATE '2020-01-03', 2.0, 5.0, NULL, NULL, NULL, NULL, false)
+    """
+    return _make_full_panel_db(tmp_path, rows, "genuine_gap.duckdb")
+
+
+def test_within_span_coverage_is_full_for_structural_gap(structural_gap_db):
+    result = compute_within_span_price_coverage(structural_gap_db)
+    # rows on/after 2020-01-03 (first nonzero sale): both have sell_price set.
+    assert result["n_rows"] == 2
+    assert result["price_coverage"] == pytest.approx(1.0)
+
+
+def test_within_span_coverage_reflects_genuine_gap(genuine_gap_db):
+    result = compute_within_span_price_coverage(genuine_gap_db)
+    # rows on/after 2020-01-01 (first nonzero sale): only 1 of 3 has a price.
+    assert result["n_rows"] == 3
+    assert result["price_coverage"] == pytest.approx(1 / 3)
+
+
+def test_addendum_lifts_bound_when_within_span_coverage_is_high(structural_gap_db):
+    text = render_addendum(structural_gap_db)
+    assert "LIFTED" in text
+    assert f"{WITHIN_SPAN_LIFT_THRESHOLD:.0%}" in text
+
+
+def test_addendum_retains_bound_when_genuine_gap_remains(genuine_gap_db):
+    text = render_addendum(genuine_gap_db)
+    assert "Decision retained" in text
+    assert "LIFTED" not in text
+
+
+def test_calendar_field_completeness_detects_inconsistent_event_pairing(tmp_path):
+    rows = """
+        ('P1', 'S1', 'FOODS', DATE '2020-01-01', 1.0, 5.0, 'Xmas', NULL, NULL, NULL, true),
+        ('P1', 'S1', 'FOODS', DATE '2020-01-02', 1.0, 5.0, NULL, NULL, NULL, NULL, false)
+    """
+    db_path = _make_full_panel_db(tmp_path, rows, "broken_events.duckdb")
+    result = compute_calendar_field_completeness(db_path)
+    assert result["n_rows"] == 2
+    assert result["snap_coverage"] == pytest.approx(1.0)
+    # row 1 has event_name_1 set but event_type_1 NULL -- inconsistent pairing.
+    assert result["event1_consistency"] == pytest.approx(0.5)
+
+
+def test_within_span_monthly_price_coverage_shape(structural_gap_db):
+    monthly = compute_within_span_monthly_price_coverage(structural_gap_db)
+    assert list(monthly["year_month"]) == ["2020-01"]
+    assert monthly.iloc[0]["price_coverage"] == pytest.approx(1.0)

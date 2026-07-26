@@ -289,3 +289,98 @@ Aggregate (volume-pooled) `price_coverage` does not reach and hold 90% until **2
 | 2016-03 | 324,570 | 100.0% | 9.7% | 0.937 |
 | 2016-04 | 314,100 | 100.0% | 3.3% | 0.969 |
 | 2016-05 | 230,340 | 100.0% | 13.6% | 0.983 |
+
+
+---
+
+## Addendum: within-active-span price coverage (evidence-led correction)
+
+The finding above measured price coverage across the *entire* panel, including rows before each (product, location) pair's own first nonzero sale. Restricting to rows on/after each series' first nonzero sale (i.e. within its active span) gives a materially different picture:
+
+- Within-span price coverage: **100.00%** (46,796,220 rows)
+- Monthly within-span price coverage ranges from **100.00%** to **100.00%** across all 65 months in the dataset.
+
+**Revised decision:** within-span price coverage is >= 99% with no residual monthly cliff. The prices missing in the original finding are entirely structural pre-listing rows (a product not yet stocked/priced at that store), not a genuine label-integrity gap. The **2014-04 training-window bound** declared above (because aggregate price coverage did not reach and hold 90% until then) is **LIFTED**. Price-covariate reliability is fully handled by the per-series active-span filter (task 1.4 / PROTOCOL_P1.md); no additional calendar-wide training-window restriction is warranted.
+
+| Month | Rows (within span) | Within-span price coverage |
+|---|---|---|
+| 2011-01 | 25,178 | 100.00% |
+| 2011-02 | 336,382 | 100.00% |
+| 2011-03 | 417,720 | 100.00% |
+| 2011-04 | 429,329 | 100.00% |
+| 2011-05 | 459,346 | 100.00% |
+| 2011-06 | 452,837 | 100.00% |
+| 2011-07 | 475,187 | 100.00% |
+| 2011-08 | 486,294 | 100.00% |
+| 2011-09 | 480,591 | 100.00% |
+| 2011-10 | 505,840 | 100.00% |
+| 2011-11 | 494,484 | 100.00% |
+| 2011-12 | 514,917 | 100.00% |
+| 2012-01 | 523,521 | 100.00% |
+| 2012-02 | 507,539 | 100.00% |
+| 2012-03 | 564,631 | 100.00% |
+| 2012-04 | 559,153 | 100.00% |
+| 2012-05 | 598,430 | 100.00% |
+| 2012-06 | 590,825 | 100.00% |
+| 2012-07 | 625,412 | 100.00% |
+| 2012-08 | 638,984 | 100.00% |
+| 2012-09 | 625,742 | 100.00% |
+| 2012-10 | 652,927 | 100.00% |
+| 2012-11 | 645,585 | 100.00% |
+| 2012-12 | 674,044 | 100.00% |
+| 2013-01 | 683,382 | 100.00% |
+| 2013-02 | 629,384 | 100.00% |
+| 2013-03 | 714,298 | 100.00% |
+| 2013-04 | 703,716 | 100.00% |
+| 2013-05 | 742,174 | 100.00% |
+| 2013-06 | 727,545 | 100.00% |
+| 2013-07 | 762,503 | 100.00% |
+| 2013-08 | 772,828 | 100.00% |
+| 2013-09 | 757,327 | 100.00% |
+| 2013-10 | 790,544 | 100.00% |
+| 2013-11 | 769,236 | 100.00% |
+| 2013-12 | 799,073 | 100.00% |
+| 2014-01 | 809,213 | 100.00% |
+| 2014-02 | 742,683 | 100.00% |
+| 2014-03 | 841,649 | 100.00% |
+| 2014-04 | 826,806 | 100.00% |
+| 2014-05 | 865,536 | 100.00% |
+| 2014-06 | 846,777 | 100.00% |
+| 2014-07 | 883,758 | 100.00% |
+| 2014-08 | 891,404 | 100.00% |
+| 2014-09 | 869,011 | 100.00% |
+| 2014-10 | 904,236 | 100.00% |
+| 2014-11 | 880,066 | 100.00% |
+| 2014-12 | 912,827 | 100.00% |
+| 2015-01 | 920,976 | 100.00% |
+| 2015-02 | 836,580 | 100.00% |
+| 2015-03 | 928,133 | 100.00% |
+| 2015-04 | 901,213 | 100.00% |
+| 2015-05 | 933,533 | 100.00% |
+| 2015-06 | 909,640 | 100.00% |
+| 2015-07 | 940,704 | 100.00% |
+| 2015-08 | 941,508 | 100.00% |
+| 2015-09 | 911,955 | 100.00% |
+| 2015-10 | 943,407 | 100.00% |
+| 2015-11 | 913,748 | 100.00% |
+| 2015-12 | 944,427 | 100.00% |
+| 2016-01 | 944,759 | 100.00% |
+| 2016-02 | 884,093 | 100.00% |
+| 2016-03 | 945,190 | 100.00% |
+| 2016-04 | 914,700 | 100.00% |
+| 2016-05 | 670,780 | 100.00% |
+
+## Addendum: calendar linkage completeness (verified, not assumed)
+
+| Check | Result |
+|---|---|
+| Rows joined to a calendar date (`ds` not null) | 100.00% |
+| SNAP flag populated | 100.00% |
+| `event_name_1`/`event_type_1` consistently both-null-or-both-set | 100.00% |
+| `event_name_2`/`event_type_2` consistently both-null-or-both-set | 100.00% |
+
+Confirmed complete by construction, as expected: the calendar file defines every date in the panel and always populates SNAP and the event name/type pairing (present together or absent together). Events are legitimately sparse — 4,817,420 rows carry a primary event tag, 121,960 carry a secondary one — never partially null.
+
+## Addendum: volume-retained confirmation
+
+Independently recomputed and cross-checked against the per-category breakdown in `population_report.md`: **65,831,450 / 66,927,173 units retained (98.36%)**, consistent with the category-level rows summing to the same totals.
