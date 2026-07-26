@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "augurics-engine"
+version = "0.1.0"
+description = "Augurics Forecast Engine — Phase 1"
+requires-python = ">=3.11"
+dependencies = [
+    "statsforecast",
+    "mlforecast",
+    "lightgbm",
+    "duckdb",
+    "pandas",
+    "pymc",
+    "pytest",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["engine"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
