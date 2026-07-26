@@ -15,6 +15,7 @@ dependencies = [
     "pandas",
     "pymc",
     "pytest",
+    "kaggle",
 ]
 
 [tool.hatch.build.targets.wheel]
