@@ -7,6 +7,7 @@ not adjusted after the fact.
 """
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 import duckdb
@@ -21,43 +22,54 @@ POPULATION_REPORT_MD = REPORTS_DIR / "population_report.md"
 # first nonzero sale -> dataset end)".
 MIN_ACTIVE_SPAN_DAYS = 2 * 365
 
-_ACTIVE_SPAN_SQL = """
-    WITH bounds AS (
-        SELECT MAX(ds) AS dataset_end FROM panel
-    ),
-    first_sale AS (
-        SELECT product_id, location_id, category, MIN(ds) AS first_nonzero_sale
-        FROM panel
-        WHERE y > 0
-        GROUP BY product_id, location_id, category
-    ),
-    volume AS (
-        SELECT product_id, location_id, category, SUM(y) AS total_volume
-        FROM panel
-        GROUP BY product_id, location_id, category
-    )
-    SELECT
-        v.product_id,
-        v.location_id,
-        v.category,
-        f.first_nonzero_sale,
-        b.dataset_end,
-        v.total_volume,
-        CASE WHEN f.first_nonzero_sale IS NULL THEN NULL
-             ELSE date_diff('day', f.first_nonzero_sale, b.dataset_end)
-        END AS active_span_days
-    FROM volume v
-    LEFT JOIN first_sale f
-        ON f.product_id = v.product_id AND f.location_id = v.location_id
-    CROSS JOIN bounds b
-"""
 
+def compute_active_span(db_path: Path = DB_PATH, as_of_date: date | None = None) -> pd.DataFrame:
+    """Per-series active span and total volume.
 
-def compute_active_span(db_path: Path = DB_PATH) -> pd.DataFrame:
-    """Per-series active span and total volume, from the full ingested panel."""
+    If `as_of_date` is given, "first nonzero sale", "dataset end", and
+    total volume are all computed using ONLY rows with `ds <= as_of_date`
+    -- this is what lets a backtest fold determine its own eligible
+    population from train-fold data only (Protocol P1 / E3), instead of
+    using a series' future activity to decide today's inclusion.
+    """
+    predicate = "WHERE ds <= ?" if as_of_date is not None else ""
+    params = [as_of_date] if as_of_date is not None else []
+    sql = f"""
+        WITH train AS (
+            SELECT * FROM panel {predicate}
+        ),
+        bounds AS (
+            SELECT MAX(ds) AS dataset_end FROM train
+        ),
+        first_sale AS (
+            SELECT product_id, location_id, category, MIN(ds) AS first_nonzero_sale
+            FROM train
+            WHERE y > 0
+            GROUP BY product_id, location_id, category
+        ),
+        volume AS (
+            SELECT product_id, location_id, category, SUM(y) AS total_volume
+            FROM train
+            GROUP BY product_id, location_id, category
+        )
+        SELECT
+            v.product_id,
+            v.location_id,
+            v.category,
+            f.first_nonzero_sale,
+            b.dataset_end,
+            v.total_volume,
+            CASE WHEN f.first_nonzero_sale IS NULL THEN NULL
+                 ELSE date_diff('day', f.first_nonzero_sale, b.dataset_end)
+            END AS active_span_days
+        FROM volume v
+        LEFT JOIN first_sale f
+            ON f.product_id = v.product_id AND f.location_id = v.location_id
+        CROSS JOIN bounds b
+    """
     con = duckdb.connect(str(db_path), read_only=True)
     try:
-        return con.execute(_ACTIVE_SPAN_SQL).df()
+        return con.execute(sql, params).df()
     finally:
         con.close()
 
@@ -119,13 +131,60 @@ def render_report(series_df: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
-def write_report(db_path: Path = DB_PATH, out_path: Path = POPULATION_REPORT_MD) -> Path:
+def render_per_fold_section(folds, db_path: Path = DB_PATH, min_days: int = MIN_ACTIVE_SPAN_DAYS) -> str:
+    """Per-fold eligible population, each computed from that fold's OWN
+    train-fold data only (Protocol P1 / E3) -- not the whole-history view
+    in the section above. `folds` is a sequence of objects with
+    `fold_id`, `train_end`, `holdout_start`, `holdout_end` attributes
+    (engine.backtest.protocol.Fold)."""
+    lines = [
+        "",
+        "---",
+        "",
+        "## Per-fold population (train-fold data only, Protocol P1 / E3)",
+        "",
+        "Each fold's eligible population is computed from ONLY that fold's "
+        "training data (`ds <= fold.train_end`) — active span uses the fold's "
+        "own train cutoff as \"dataset end\", not the global dataset end. This "
+        "avoids leaking a series' future activity into today's inclusion "
+        "decision. The eligible population, and therefore volume retained, "
+        "differs per fold.",
+        "",
+        "| Fold | Train end | Holdout | Series kept | Series total | Share kept | "
+        "Volume kept | Volume total | Share of volume retained |",
+        "|---|---|---|---|---|---|---|---|---|",
+    ]
+
+    for fold in folds:
+        series_df = apply_active_span_filter(
+            compute_active_span(db_path, as_of_date=fold.train_end), min_days
+        )
+        n_total = len(series_df)
+        n_kept = int(series_df["kept"].sum())
+        vol_total = series_df["total_volume"].sum()
+        vol_kept = series_df.loc[series_df["kept"], "total_volume"].sum()
+        lines.append(
+            f"| {fold.fold_id} | {fold.train_end} | {fold.holdout_start} to "
+            f"{fold.holdout_end} | {n_kept:,} | {n_total:,} | {n_kept / n_total:.1%} | "
+            f"{vol_kept:,.0f} | {vol_total:,.0f} | {vol_kept / vol_total:.1%} |"
+        )
+
+    return "\n".join(lines)
+
+
+def write_report(db_path: Path = DB_PATH, out_path: Path = POPULATION_REPORT_MD, folds=None) -> Path:
     series_df = apply_active_span_filter(compute_active_span(db_path))
+    text = render_report(series_df)
+    if folds is not None:
+        text += "\n" + render_per_fold_section(folds, db_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(render_report(series_df))
+    out_path.write_text(text)
     return out_path
 
 
 if __name__ == "__main__":
-    written = write_report()
+    from engine.backtest.protocol import dataset_bounds, make_folds
+
+    _, dataset_end = dataset_bounds()
+    written = write_report(folds=make_folds(dataset_end))
     print(f"Wrote {written}")

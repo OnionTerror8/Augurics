@@ -5,12 +5,16 @@ import duckdb
 import pandas as pd
 import pytest
 
+from datetime import date
+
 from engine.backtest.population import (
     MIN_ACTIVE_SPAN_DAYS,
     apply_active_span_filter,
     compute_active_span,
+    render_per_fold_section,
     render_report,
 )
+from engine.backtest.protocol import Fold
 
 
 @pytest.fixture
@@ -73,3 +77,49 @@ def test_render_report_computes_volume_retained(synthetic_db):
     assert "10 / 14" in report
     # HOBBIES has zero total volume; must report "n/a", never a NaN string
     assert "nan" not in report.lower()
+
+
+@pytest.fixture
+def growing_series_db(tmp_path):
+    """P_D: first nonzero sale 2016-01-01, still selling through 2020-12-31.
+    Globally that's ~5 years (kept). As of an early fold's train cutoff
+    (2017-06-01), it's only ~17 months (excluded) -- proving per-fold
+    active span differs from the whole-history view."""
+    db_path = tmp_path / "growing.duckdb"
+    con = duckdb.connect(str(db_path))
+    con.execute("""
+        CREATE TABLE panel AS
+        SELECT * FROM (VALUES
+            ('P_D', 'S1', 'FOODS', DATE '2016-01-01', 1.0),
+            ('P_D', 'S1', 'FOODS', DATE '2017-06-01', 1.0),
+            ('P_D', 'S1', 'FOODS', DATE '2020-12-31', 1.0)
+        ) AS t(product_id, location_id, category, ds, y)
+    """)
+    con.close()
+    return db_path
+
+
+def test_active_span_as_of_date_uses_train_data_only(growing_series_db):
+    global_span = compute_active_span(growing_series_db)
+    assert bool(apply_active_span_filter(global_span).iloc[0]["kept"]) is True
+
+    early_fold_span = compute_active_span(growing_series_db, as_of_date=date(2017, 6, 1))
+    early_row = early_fold_span.iloc[0]
+    assert early_row["dataset_end"] == pd.Timestamp("2017-06-01")
+    assert early_row["active_span_days"] == (
+        pd.Timestamp("2017-06-01") - pd.Timestamp("2016-01-01")
+    ).days
+    assert bool(apply_active_span_filter(early_fold_span).iloc[0]["kept"]) is False
+
+
+def test_render_per_fold_section_differs_from_global_population(growing_series_db):
+    folds = [
+        Fold(fold_id=1, train_end=date(2017, 6, 1), holdout_start=date(2017, 6, 2), holdout_end=date(2017, 6, 29)),
+        Fold(fold_id=2, train_end=date(2020, 12, 31), holdout_start=date(2021, 1, 1), holdout_end=date(2021, 1, 28)),
+    ]
+    section = render_per_fold_section(folds, growing_series_db)
+    assert "| 1 | 2017-06-01 |" in section
+    assert "| 2 | 2020-12-31 |" in section
+    # fold 1: P_D excluded (0 kept); fold 2: P_D kept (1 kept)
+    assert "| 1 | 2017-06-01 | 2017-06-02 to 2017-06-29 | 0 | 1 |" in section
+    assert "| 2 | 2020-12-31 | 2021-01-01 to 2021-01-28 | 1 | 1 |" in section
