@@ -58,7 +58,7 @@ _ELIGIBLE_CTE = """
 _TRAIN_FRAME_SQL = (
     _ELIGIBLE_CTE
     + """
-    SELECT (p.product_id || '::' || p.location_id) AS series_key, p.ds, p.y
+    SELECT (p.product_id || '::' || p.location_id) AS series_key, p.ds, p.y, p.category
     FROM panel p
     JOIN eligible e ON e.product_id = p.product_id AND e.location_id = p.location_id
     WHERE p.ds <= $train_end
@@ -68,7 +68,7 @@ _TRAIN_FRAME_SQL = (
 _HOLDOUT_FRAME_SQL = (
     _ELIGIBLE_CTE
     + """
-    SELECT (p.product_id || '::' || p.location_id) AS series_key, p.ds, p.y
+    SELECT (p.product_id || '::' || p.location_id) AS series_key, p.ds, p.y, p.category
     FROM panel p
     JOIN eligible e ON e.product_id = p.product_id AND e.location_id = p.location_id
     WHERE p.ds >= $holdout_start AND p.ds <= $holdout_end
@@ -142,7 +142,12 @@ def load_slow_batch_results(results_dir: Path) -> dict[int, dict[str, dict]]:
     return fold_results
 
 
-def score_model(model_id: str, train_df: pd.DataFrame, holdout_df: pd.DataFrame, holdout_days: int) -> dict:
+def _fit_predict_merge(
+    model_id: str, train_df: pd.DataFrame, holdout_df: pd.DataFrame, holdout_days: int
+) -> tuple[pd.DataFrame, float, float]:
+    """Fit, predict, and merge against holdout actuals -- the shared core
+    of both the aggregate and per-category scoring paths, so they can
+    never compute a different fit/prediction from each other."""
     model_cls = REGISTRY[model_id]
     model = model_cls()
 
@@ -164,6 +169,11 @@ def score_model(model_id: str, train_df: pd.DataFrame, holdout_df: pd.DataFrame,
     merged = preds.merge(holdout_lookup, on=["series_key", "ds"], how="inner")
     if merged.empty:
         raise ValueError(f"{model_id}: no predictions aligned with holdout actuals")
+    return merged, fit_seconds, predict_seconds
+
+
+def score_model(model_id: str, train_df: pd.DataFrame, holdout_df: pd.DataFrame, holdout_days: int) -> dict:
+    merged, fit_seconds, predict_seconds = _fit_predict_merge(model_id, train_df, holdout_df, holdout_days)
 
     return {
         "wmape": wmape(merged["y_true"].to_numpy(), merged["yhat"].to_numpy()),
@@ -172,6 +182,36 @@ def score_model(model_id: str, train_df: pd.DataFrame, holdout_df: pd.DataFrame,
         "fit_seconds": fit_seconds,
         "predict_seconds": predict_seconds,
     }
+
+
+def score_model_by_category(
+    model_id: str, train_df: pd.DataFrame, holdout_df: pd.DataFrame, holdout_days: int, fold_id: int
+) -> pd.DataFrame:
+    """Per-category volume-weighted WMAPE (Protocol P1: "also reported per
+    category"). Requires a `category` column in train_df/holdout_df --
+    the same fit/predict/merge as score_model(), just grouped before
+    scoring, so it can never disagree with the aggregate result."""
+    if "category" not in train_df.columns:
+        raise ValueError("score_model_by_category requires a 'category' column in train_df")
+
+    merged, _, _ = _fit_predict_merge(model_id, train_df, holdout_df, holdout_days)
+
+    category_map = train_df.drop_duplicates("series_key").set_index("series_key")["category"]
+    merged = merged.assign(category=merged["series_key"].map(category_map))
+
+    rows = []
+    for category, group in merged.groupby("category"):
+        rows.append(
+            {
+                "fold_id": fold_id,
+                "model_id": model_id,
+                "category": category,
+                "wmape": wmape(group["y_true"].to_numpy(), group["yhat"].to_numpy()),
+                "n_series": group["series_key"].nunique(),
+                "volume": float(group["y_true"].sum()),
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def run_fold(fold: Fold, model_ids: list[str], db_path: Path = DB_PATH, cache_dir: Path = CACHE_DIR) -> dict:
