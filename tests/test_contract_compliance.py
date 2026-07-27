@@ -14,6 +14,8 @@ from datetime import date, datetime, timedelta
 import pandas as pd
 import pytest
 
+import engine.models.baselines  # noqa: F401  -- side effect: registers Rung 1 baselines
+import engine.models.comparators  # noqa: F401  -- side effect: registers bayes_glm_pooled
 from engine.models.base import (
     DateRange,
     ForecastModel,
@@ -120,3 +122,18 @@ class TestContractCompliance:
         for ds_value in round_tripped["ds"]:
             datetime.fromisoformat(ds_value)  # raises if not a valid ISO string
         datetime.fromisoformat(round_tripped["generated_at"])
+
+    def test_save_load_round_trip_predicts_identically(self, model_cls, tmp_path):
+        model = model_cls()
+        panel = _make_panel(model_cls.min_history_days + 30)
+        model.fit(panel, _default_config())
+        before = model.predict(horizon=7, future_covariates=None)
+
+        artefact_uri = str(tmp_path / f"{model_cls.model_id}.pkl")
+        model.save(artefact_uri)
+        loaded = model_cls.load(artefact_uri)
+        after = loaded.predict(horizon=7, future_covariates=None)
+
+        assert after.series_key == before.series_key
+        assert after.yhat == before.yhat
+        assert after.ds == before.ds
