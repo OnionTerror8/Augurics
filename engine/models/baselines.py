@@ -29,6 +29,8 @@ from engine.models.base import (
     NaNOutputError,
     PanelData,
     SeriesKey,
+    encode_series_key,
+    select_series,
 )
 from engine.registry import register
 
@@ -36,7 +38,7 @@ SEASON_LENGTH = 7  # weekly seasonality, daily M5-style data
 
 
 def _series_key_to_uid(series_key: SeriesKey) -> str:
-    return "::".join(str(part) for part in series_key)
+    return encode_series_key(*series_key)
 
 
 class _StatsForecastBaseline(ForecastModel):

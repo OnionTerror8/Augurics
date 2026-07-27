@@ -44,6 +44,7 @@ from engine.models.base import (
     NaNOutputError,
     PanelData,
     SeriesKey,
+    select_series,
 )
 from engine.registry import register
 
@@ -245,6 +246,43 @@ class BayesGLMPooled(ForecastModel):
         except Exception as exc:  # NUTS spot-check is a diagnostic, not load-bearing for the fit itself
             return {"ran": False, "reason": f"NUTS spot-check failed: {exc}"}
 
+    def coefficient_plausibility_report(self) -> pd.DataFrame:
+        """Coefficient plausibility evaluated at OBSERVED exposures (median,
+        p90), never naively at feature = 1.0 (E4). Some engineered features
+        structurally never attain 1.0 within the fitted data (e.g. a
+        heavily-decayed adstock or a log-price column whose range excludes
+        1.0) -- reported as "not attainable" there rather than a misleading
+        number computed off the support of the data."""
+        if self._trace is None:
+            raise RuntimeError(f"{self.model_id}.coefficient_plausibility_report() called before fit()")
+
+        X = _build_features(self._fit_df, feature_names=self._feature_names)
+        mu_beta = self._trace.posterior["mu_beta"].mean(dim=("chain", "draw")).values
+
+        rows = []
+        for i, feature_name in enumerate(self._feature_names):
+            values = X[feature_name].to_numpy(dtype=float)
+            median_val = float(np.median(values))
+            p90_val = float(np.quantile(values, 0.9))
+            beta_i = float(mu_beta[i])
+
+            attainable_at_1 = bool(values.min() <= 1.0 <= values.max())
+            effect_at_1 = float(np.exp(beta_i * 1.0)) if attainable_at_1 else "not attainable"
+
+            rows.append(
+                {
+                    "feature": feature_name,
+                    "beta_pooled": beta_i,
+                    "median_exposure": median_val,
+                    "effect_at_median": float(np.exp(beta_i * median_val)),
+                    "p90_exposure": p90_val,
+                    "effect_at_p90": float(np.exp(beta_i * p90_val)),
+                    "feature_eq_1_attainable": attainable_at_1,
+                    "effect_at_1": effect_at_1,
+                }
+            )
+        return pd.DataFrame(rows)
+
     def _posterior_beta_for_category(self, category: str) -> np.ndarray:
         cat_idx = self._category_codes.get(category, 0)
         mu_beta = self._trace.posterior["mu_beta"].mean(dim=("chain", "draw")).values
@@ -334,7 +372,7 @@ class BayesGLMPooled(ForecastModel):
         offset = self._series_offset[series_key]
         beta = self._posterior_beta_for_category(category)
 
-        series_df = self._fit_df[self._fit_df["series_key"] == series_key].sort_values("ds")
+        series_df = select_series(self._fit_df, series_key).sort_values("ds")
         mask = (series_df["ds"].dt.date >= date_range.start) & (series_df["ds"].dt.date <= date_range.end)
         windowed = series_df.loc[mask] if mask.any() else series_df
 

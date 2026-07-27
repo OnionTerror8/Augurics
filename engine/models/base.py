@@ -16,6 +16,36 @@ SeriesKey = tuple[str, str]  # (product_id, location_id)
 
 PANEL_COLUMNS = ("series_key", "ds", "y", "static_features", "known_future", "observed_past")
 
+# The one place the "ITEM::STORE" bulk-path series_key string convention is
+# defined. Every module that builds or matches this uid string (SQL in
+# run_baselines.py, engine.models.baselines, ad hoc scripts) must use these,
+# never re-derive the separator or join order locally -- a silently
+# inconsistent convention is exactly how a key-format mismatch produces a
+# filter that matches nothing without raising.
+SERIES_KEY_SEP = "::"
+
+
+def encode_series_key(product_id: str, location_id: str) -> str:
+    return f"{product_id}{SERIES_KEY_SEP}{location_id}"
+
+
+def select_series(df: pd.DataFrame, key, series_key_col: str = "series_key", expected_count: int | None = None) -> pd.DataFrame:
+    """Fail loud: selecting a specific, supposedly-real series and getting
+    zero rows back is never a legitimate outcome (unlike an iteration that
+    tries several candidates) -- it means the key convention doesn't match
+    what's actually in `series_key_col` (e.g. a tuple compared against a
+    bulk-path uid string), and that must raise immediately, not silently
+    produce an empty frame for the caller to trip over later."""
+    subset = df[df[series_key_col] == key]
+    if subset.empty:
+        raise ValueError(
+            f"select_series: no rows for {series_key_col}={key!r} -- check the key "
+            f"format/convention (e.g. tuple vs '{SERIES_KEY_SEP}'-joined string)"
+        )
+    if expected_count is not None and len(subset) != expected_count:
+        raise ValueError(f"select_series: expected {expected_count} rows for {series_key_col}={key!r}, got {len(subset)}")
+    return subset
+
 
 class InsufficientHistoryError(Exception):
     """Raised by fit() when a series is below min_history_days. Never fit on garbage."""
