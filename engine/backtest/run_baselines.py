@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 import duckdb
+import numpy as np
 import pandas as pd
 
 import engine.models.baselines  # noqa: F401 -- side effect: registers Rung 1 baselines
@@ -101,6 +102,44 @@ def get_fold_frames_cached(fold: Fold, db_path: Path = DB_PATH, cache_dir: Path 
     train_df.to_parquet(train_path)
     holdout_df.to_parquet(holdout_path)
     return train_df, holdout_df
+
+
+REQUIRED_RESULT_COLUMNS = {"fold_id", "model_id", "wall_seconds", "wmape", "n_series", "n_rows"}
+
+
+class ResultSchemaError(Exception):
+    """Raised when a result parquet does not hold the scoring-result schema
+    (fold_id/model_id/wall_seconds/wmape/n_series/n_rows) -- e.g. an
+    orchestrator bookkeeping record written to the wrong path, or a
+    partial/corrupt file. Result files are validated by CONTENT at
+    assembly time, never trusted by filename alone."""
+
+
+def load_and_validate_result(path: Path) -> dict:
+    df = pd.read_parquet(path)
+    if len(df) != 1:
+        raise ResultSchemaError(f"{path}: expected exactly one row, got {len(df)}")
+
+    missing = REQUIRED_RESULT_COLUMNS - set(df.columns)
+    if missing:
+        raise ResultSchemaError(f"{path}: missing expected result columns {sorted(missing)}")
+
+    record = df.iloc[0].to_dict()
+    if pd.isna(record["n_series"]) or record["n_series"] <= 0:
+        raise ResultSchemaError(f"{path}: n_series must be positive, got {record['n_series']!r}")
+    if pd.isna(record["wmape"]) or record["wmape"] < 0 or not np.isfinite(record["wmape"]):
+        raise ResultSchemaError(f"{path}: wmape is not a valid non-negative finite number: {record['wmape']!r}")
+    return record
+
+
+def load_slow_batch_results(results_dir: Path) -> dict[int, dict[str, dict]]:
+    """Read back every (fold, model) result from a run_slow_baselines batch,
+    schema-validating each file's content before trusting it."""
+    fold_results: dict[int, dict[str, dict]] = {}
+    for path in sorted(results_dir.glob("fold*_*.parquet")):
+        record = load_and_validate_result(path)
+        fold_results.setdefault(record["fold_id"], {})[record["model_id"]] = record
+    return fold_results
 
 
 def score_model(model_id: str, train_df: pd.DataFrame, holdout_df: pd.DataFrame, holdout_days: int) -> dict:

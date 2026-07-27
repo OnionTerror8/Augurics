@@ -20,7 +20,6 @@ from engine.backtest.protocol import dataset_bounds, make_folds
 from engine.backtest.run_baselines import CACHE_DIR
 
 RESULTS_DIR = CACHE_DIR / "slow_baseline_results"
-LOG_PATH = RESULTS_DIR / "run_log.txt"
 MODEL_IDS = ["auto_ets", "theta"]
 
 

@@ -9,6 +9,7 @@ state in one long-lived process.
 from __future__ import annotations
 
 import argparse
+import os
 import time
 from pathlib import Path
 
@@ -40,7 +41,15 @@ def main() -> None:
     record = {"fold_id": fold.fold_id, "model_id": args.model_id, "wall_seconds": wall_seconds, **result}
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame([record]).to_parquet(out_path)
+
+    # Atomic write: the result file must exist ONLY on full success, so the
+    # orchestrator's resume-skip check (`if result_path.exists(): skip`) is
+    # correct by construction -- a crash or kill mid-write must never leave
+    # a partial/corrupt file at out_path.
+    tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
+    pd.DataFrame([record]).to_parquet(tmp_path)
+    os.replace(tmp_path, out_path)
+
     print(f"fold {fold.fold_id} {args.model_id}: {wall_seconds:.1f}s wmape={result['wmape']:.4f}", flush=True)
 
 
