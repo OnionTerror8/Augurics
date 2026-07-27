@@ -1,0 +1,38 @@
+# LightGBM hyperparameter grid — pre-registered BEFORE any challenger
+# (task 2.3) or full baseline result exists, per PHASE1_KICKOFF.md task
+# 2.3 and non-negotiable rule 7: "Hyperparameter grids and population
+# filters are declared in config before results are seen."
+#
+# Immutable once committed, same discipline as PROTOCOL_P1.md's gates:
+# if this grid needs to change, that is a new, documented decision in a
+# later commit, never a silent edit of this file after seeing results.
+#
+# 12 combos (2 x 3 x 2), the maximum allowed by kickoff §2 task 2.3.
+
+protocol_id: "lgbm_promo_v1_grid"
+model_id: "lgbm_promo_v1"
+pre_registered_at: "2026-07-27"
+max_combos: 12
+
+search_space:
+  num_leaves: [31, 63]
+  learning_rate: [0.05, 0.1, 0.2]
+  n_estimators: [100, 300]
+
+# The full enumerated grid, explicit rather than left to be recomputed
+# from search_space -- so a change in enumeration order or a silently
+# widened search_space is a visible diff against this list, not just
+# against the ranges above.
+combos:
+  - {num_leaves: 31, learning_rate: 0.05, n_estimators: 100}
+  - {num_leaves: 31, learning_rate: 0.05, n_estimators: 300}
+  - {num_leaves: 31, learning_rate: 0.1,  n_estimators: 100}
+  - {num_leaves: 31, learning_rate: 0.1,  n_estimators: 300}
+  - {num_leaves: 31, learning_rate: 0.2,  n_estimators: 100}
+  - {num_leaves: 31, learning_rate: 0.2,  n_estimators: 300}
+  - {num_leaves: 63, learning_rate: 0.05, n_estimators: 100}
+  - {num_leaves: 63, learning_rate: 0.05, n_estimators: 300}
+  - {num_leaves: 63, learning_rate: 0.1,  n_estimators: 100}
+  - {num_leaves: 63, learning_rate: 0.1,  n_estimators: 300}
+  - {num_leaves: 63, learning_rate: 0.2,  n_estimators: 100}
+  - {num_leaves: 63, learning_rate: 0.2,  n_estimators: 300}
