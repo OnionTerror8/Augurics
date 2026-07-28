@@ -1,5 +1,8 @@
 name: runner-spec-probe
-on: workflow_dispatch
+
+on:
+  workflow_dispatch: {}
+
 jobs:
   probe:
     runs-on: ubuntu-latest
