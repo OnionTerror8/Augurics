@@ -65,6 +65,5 @@ Every figure above comes from validated result parquets (`engine.backtest.run_ba
 
 No Rung 2 challenger exists yet (task 2.3), so no gate is evaluated here. Protocol P1 (immutable) defines G1's comparator as **Seasonal Naive** and G2's as **AutoETS** -- restated as concrete WMAPE thresholds:
 
-- **G1**: challenger WMAPE must be <= `0.85` x 0.8630 (Seasonal Naive summary) = **0.7335**
+- **G1**: challenger WMAPE must be <= `0.85` x 0.8630 (Seasonal Naive summary) = **0.7335** -- confirmed against PROTOCOL_P1.md's text (G1's comparator is Seasonal Naive). Discrepancy flag closed.
 - **G2**: challenger WMAPE must be <= `0.92` x 0.7272 (AutoETS summary) = **0.6690**
-- _Flagged discrepancy: if G1 were evaluated against plain Naive instead (0.85 x 0.9704 = **0.8248**), the threshold would differ from the Protocol-P1-correct Seasonal Naive threshold above. PROTOCOL_P1.md names Seasonal Naive as G1's comparator; this line exists only to make the discrepancy visible, not as an alternative gate._

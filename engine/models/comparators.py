@@ -55,6 +55,51 @@ ADVI_LEARNING_RATE = 0.01
 POSTERIOR_DRAWS = 500
 CO_FIRING_CORRELATION_THRESHOLD = 0.995
 
+# The NUTS spot-check's job is validating ADVI's approximation quality --
+# a property of the model/data distribution, not of how many series
+# happen to be in the fold. Capping it here decouples its cost from
+# population size: uncapped, it scaled with the full category (measured:
+# ~18h/fold on fold 1's real FOODS subset alone), which is why it now
+# runs on a bounded, seeded, category-stratified sample instead.
+NUTS_SPOT_CHECK_MAX_ROWS = 100_000
+NUTS_SPOT_CHECK_SEED = 42
+
+ADVI_CONVERGENCE_TAIL_FRACTION = 0.10
+ADVI_CONVERGENCE_REL_TOLERANCE = 0.05
+
+
+class ADVIConvergenceError(Exception):
+    """Raised when ADVI's ELBO loss history does not indicate convergence
+    -- never silently report a fit whose loss was still moving or was
+    NaN/Inf in its final iterations."""
+
+
+def _check_advi_convergence(
+    loss_hist: np.ndarray,
+    tail_fraction: float = ADVI_CONVERGENCE_TAIL_FRACTION,
+    rel_tolerance: float = ADVI_CONVERGENCE_REL_TOLERANCE,
+) -> float:
+    """Returns the relative change of the ELBO loss across the final
+    `tail_fraction` of iterations; raises if that change exceeds
+    `rel_tolerance` or the history contains any non-finite value."""
+    loss_hist = np.asarray(loss_hist, dtype=float)
+    if loss_hist.size == 0 or np.any(~np.isfinite(loss_hist)):
+        raise ADVIConvergenceError("ADVI loss history is empty or contains NaN/Inf -- fit did not converge")
+
+    tail_n = max(int(loss_hist.size * tail_fraction), 10)
+    tail = loss_hist[-tail_n:]
+    first_half, second_half = tail[: len(tail) // 2], tail[len(tail) // 2 :]
+    denom = abs(first_half.mean()) + 1e-8
+    rel_change = abs(second_half.mean() - first_half.mean()) / denom
+
+    if rel_change > rel_tolerance:
+        raise ADVIConvergenceError(
+            f"ADVI ELBO relative change over the final {tail_fraction:.0%} of "
+            f"iterations is {rel_change:.2%}, exceeding the {rel_tolerance:.0%} "
+            f"tolerance -- loss has not stabilised"
+        )
+    return rel_change
+
 
 def _active_span_offset(y: np.ndarray) -> float:
     """log(mean sales over active span), never full-window mean (E3):
@@ -100,7 +145,7 @@ class BayesGLMPooled(ForecastModel):
         self._identifiability_note = "not evaluated"
         self._nuts_spot_check: dict | None = None
 
-    def fit(self, panel: PanelData, config: ModelConfig) -> FitResult:
+    def fit(self, panel: PanelData, config: ModelConfig, run_nuts_spot_check: bool = True) -> FitResult:
         df = panel.df.copy()
         counts = df.groupby("series_key").size()
         too_short = counts[counts < self.min_history_days]
@@ -181,16 +226,21 @@ class BayesGLMPooled(ForecastModel):
                 random_seed=42,
                 obj_optimizer=pm.adam(learning_rate=ADVI_LEARNING_RATE),
             )
+            advi_convergence_rel_change = _check_advi_convergence(approx.hist)
             trace = approx.sample(POSTERIOR_DRAWS)
 
         self._family = family_from_fitted_object
         self._trace = trace
         self._fit_df = df
 
-        # NUTS spot-check on one category (kickoff §3): documented either way.
-        self._nuts_spot_check = self._run_nuts_spot_check(
-            df, categories_sorted[0], X_arr.shape[1]
-        )
+        # NUTS spot-check on one category (kickoff §3): documented either
+        # way. Bounded per NUTS_SPOT_CHECK_MAX_ROWS regardless of fold size
+        # (see module docstring for why); skippable via run_nuts_spot_check
+        # for fold runs where it's only meant to happen once, not per fold.
+        if run_nuts_spot_check:
+            self._nuts_spot_check = self._run_nuts_spot_check(df, categories_sorted[0], X_arr.shape[1])
+        else:
+            self._nuts_spot_check = {"ran": False, "reason": "run_nuts_spot_check=False for this fit"}
 
         overdispersion_ratio = float(y_arr.var() / max(y_arr.mean(), 1e-6))
 
@@ -204,19 +254,40 @@ class BayesGLMPooled(ForecastModel):
                 "n_categories": n_categories,
                 "overdispersion_ratio": overdispersion_ratio,
                 "fit_method": "ADVI",
+                "advi_convergence_rel_change": advi_convergence_rel_change,
                 "identifiability_note": self._identifiability_note,
                 "nuts_spot_check": self._nuts_spot_check,
             },
         )
 
-    def _run_nuts_spot_check(self, df: pd.DataFrame, spot_category: str, n_features: int) -> dict:
+    def _run_nuts_spot_check(
+        self,
+        df: pd.DataFrame,
+        spot_category: str,
+        n_features: int,
+        max_rows: int = NUTS_SPOT_CHECK_MAX_ROWS,
+        seed: int = NUTS_SPOT_CHECK_SEED,
+    ) -> dict:
         """Fit budget per kickoff §3: ADVI for speed, NUTS spot-check on one
-        category, documented either way. Runs a small NUTS chain on just
-        that category's rows and compares its mean coefficient vector to
+        category, documented either way. Runs a small NUTS chain on that
+        category's rows -- capped to `max_rows` via a seeded, whole-series
+        subsample (never a bare row sample, which would mix partial series)
+        so the spot-check's cost is bounded regardless of the fold's actual
+        population size -- and compares its mean coefficient vector to
         ADVI's for the same category."""
         subset = df[df["category"] == spot_category]
         if len(subset) < self.min_history_days:
             return {"ran": False, "reason": f"category {spot_category!r} too small for a spot-check"}
+
+        original_rows = len(subset)
+        capped = original_rows > max_rows
+        if capped:
+            rng = np.random.default_rng(seed)
+            series_keys = subset["series_key"].unique()
+            rng.shuffle(series_keys)
+            rows_per_series = original_rows / len(series_keys)
+            n_series_to_keep = max(1, int(max_rows / rows_per_series))
+            subset = subset[subset["series_key"].isin(set(series_keys[:n_series_to_keep]))]
 
         X = _build_features(subset, feature_names=self._feature_names).to_numpy(dtype=float)
         y = subset["y"].to_numpy(dtype=float)
@@ -242,7 +313,14 @@ class BayesGLMPooled(ForecastModel):
                 * self._trace.posterior["beta_offset"].mean(dim=("chain", "draw")).values[cat_idx]
             )
             mean_abs_diff = float(np.mean(np.abs(nuts_beta_mean - advi_beta_mean)))
-            return {"ran": True, "category": spot_category, "mean_abs_coef_diff_advi_vs_nuts": mean_abs_diff}
+            return {
+                "ran": True,
+                "category": spot_category,
+                "mean_abs_coef_diff_advi_vs_nuts": mean_abs_diff,
+                "capped": capped,
+                "original_category_rows": original_rows,
+                "spot_check_rows": len(subset),
+            }
         except Exception as exc:  # NUTS spot-check is a diagnostic, not load-bearing for the fit itself
             return {"ran": False, "reason": f"NUTS spot-check failed: {exc}"}
 
@@ -309,6 +387,56 @@ class BayesGLMPooled(ForecastModel):
         fut["trend"] = ((fut["ds"] - self._fit_df["ds"].min()).dt.days.astype(float)) / 30.0
         fut["log_price"] = np.log(fut["price"].astype(float).clip(lower=1e-3)).fillna(0.0)
         return fut
+
+    def _predict_all(self, horizon: int, future_covariates: pd.DataFrame | None = None) -> pd.DataFrame:
+        """Bulk prediction for every fitted series at once -- not part of
+        the ABC contract, used by the per-fold backtest orchestration the
+        same way engine.models.baselines._predict_all() is (predict()
+        itself stays single-series, per the ABC's signature).
+
+        `future_covariates`, if given, is either date-indexed only (one
+        row per `ds`, broadcast to every series -- e.g. calendar/SNAP,
+        which are shared) or has a `series_key` column too (e.g. price,
+        which varies per series); detected by column presence."""
+        if self._trace is None:
+            raise RuntimeError(f"{self.model_id}._predict_all() called before fit()")
+
+        last_ds = self._fit_df["ds"].max()
+        future_dates = pd.date_range(last_ds + pd.Timedelta(days=1), periods=horizon, freq="D")
+        per_series_covariates = future_covariates is not None and "series_key" in future_covariates.columns
+
+        frames = []
+        for series_key, category in self._series_category.items():
+            offset = self._series_offset[series_key]
+            beta = self._posterior_beta_for_category(category)
+
+            fut = pd.DataFrame({"ds": future_dates})
+            if future_covariates is not None:
+                cov = future_covariates[future_covariates["series_key"] == series_key] if per_series_covariates else future_covariates
+                cov = cov.copy()
+                cov["ds"] = pd.to_datetime(cov["ds"])
+                fut = fut.merge(cov.drop(columns=["series_key"], errors="ignore"), on="ds", how="left")
+
+            for col, default in (("event_flag", 0.0), ("snap_flag", 0.0), ("price", np.nan)):
+                if col not in fut.columns:
+                    fut[col] = default
+                fut[col] = fut[col].fillna(default)
+
+            fut["dow"] = fut["ds"].dt.dayofweek
+            fut["month"] = fut["ds"].dt.month
+            fut["trend"] = ((fut["ds"] - self._fit_df["ds"].min()).dt.days.astype(float)) / 30.0
+            fut["log_price"] = np.log(fut["price"].astype(float).clip(lower=1e-3)).fillna(0.0)
+
+            X_future = _build_features(fut, feature_names=self._feature_names).to_numpy(dtype=float)
+            eta = np.clip(offset + X_future @ beta, -10, 10)
+            yhat = np.exp(eta)
+            if np.any(np.isnan(yhat)):
+                raise NaNOutputError(f"{self.model_id}._predict_all() produced NaN output for series {series_key}")
+            yhat = np.clip(yhat, 0.0, None)
+
+            frames.append(pd.DataFrame({"series_key": [series_key] * horizon, "ds": future_dates, "yhat": yhat}))
+
+        return pd.concat(frames, ignore_index=True)
 
     def predict(self, horizon: int, future_covariates: PanelData | None) -> ForecastResult:
         if self._trace is None:
