@@ -2,6 +2,64 @@
 
 Tracked but not yet fixed. Add new entries at the top.
 
+## CLOSED, working as designed: pre-fit memory estimator's first live catch forced a move to cloud compute (2026-07-28)
+
+The real fold-1 launch (post-OOM-refactor, see the entry below) hit
+`_check_fit_memory`'s `InsufficientMemoryError` immediately (23.2s, not
+another ~577s SIGKILL): estimated fit footprint 3.90GB against this
+machine's available RAM, which fluctuated 1.70-3.14GB across several
+rechecks over ~20 minutes of closing applications and never cleared the
+budget (50% of available). Swap stayed pinned at 6-13GB used throughout
+regardless of how much was freed at the app level -- this laptop's
+baseline memory pressure (Chrome/Slack/Teams/Word/Outlook, all normally
+open) is high enough that a bare 4GB, single-fit budget is not reliably
+available interactively.
+
+This is not a defect in the guard -- it is the guard doing exactly its
+job: refusing loud, with numbers, before wasting a multi-hour ADVI fit
+on something that would have SIGKILLed partway through again. No change
+to `MAX_FIT_MEMORY_FRACTION` or the estimator. Decision: the real 4-fold
+batch moves to a provisioned cloud VM (16GB+ RAM, see `PROVISIONING.md`)
+rather than continuing to compete with this machine's normal desktop
+load. Fold 1's pre-flight check on a 16GB box has ~4x headroom against
+the 3.90GB estimate.
+
+## CLOSED (design catch): dense one-hot dow/month encoding caused a real fold-1 OOM (2026-07-27)
+
+Launching the real comparator batch on fold 1 (48.1M rows) was
+SIGKILLed (exit -9) after 577.3s -- far too early for the ~2.6h expected
+ADVI fit. Diagnosed via `sysctl vm.swapusage` (13.0/14.3GB swap used)
+and `psutil.virtual_memory()` (~1.5GB available, 91.3% used) at the time
+of the kill. Root cause: `_build_features()`'s `pd.get_dummies`
+one-hot encoding of day-of-week (7 levels) and month (12 levels)
+materialised 19 dense float64 columns x 48.1M rows (~7.3GB for that
+block alone, before pandas' typical 2-3x construction/copy overhead).
+
+Fixed by design, not patched: day-of-week and month became
+integer-indexed categorical effects inside the PyMC model itself
+(`beta_dow[cat_idx, dow_idx]`, `beta_month[cat_idx, month_idx]`) instead
+of dense dummy columns -- confirmed via a standalone pytensor test that
+this performs the identical elementwise gather a dense-dummy matmul
+would. Continuous features moved to float32; category/dow/month index
+arrays use `int8`. A pre-fit memory estimator
+(`_estimate_fit_memory_bytes` / `_check_fit_memory` /
+`InsufficientMemoryError` in `engine/models/comparators.py`) now refuses
+to start a fit whose estimated footprint exceeds `MAX_FIT_MEMORY_FRACTION`
+(50%) of currently-available RAM, turning a ~10-minute SIGKILL into a
+one-second refusal with numbers (see the entry above for its first live
+catch).
+
+An equivalence proof (rerunning the 182-series evidence fit with the
+new parameterisation, same seed) incidentally surfaced a second,
+unrelated instability in the `trend` feature during this same
+investigation -- see `reports/comparator_evidence.md` §7 for the full
+writeup and fix (trend rescaled to fraction-of-training-span, its prior
+tightened). That fix, not this one, is what made the comparator
+reliably beat seasonal naive on the evidence sample; this entry's fix
+(indexed categoricals, float32, int8, memory estimator) addressed the
+OOM only and was confirmed equivalent to the pre-refactor model once the
+trend fix was applied on top.
+
 ## CLOSED (design catch): NUTS spot-check cost was coupled to fold population size (2026-07-28)
 
 Before launching the comparator's real 4-fold gate-relevant run, timed

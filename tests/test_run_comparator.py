@@ -123,7 +123,11 @@ def test_predictive_agreement_check_detects_forced_divergence():
         run_nuts_spot_check=True,
     )
     spot_check = dict(fit_result.diagnostics["nuts_spot_check"])
-    spot_check["nuts_beta"] = [b + 5.0 for b in spot_check["nuts_beta"]]  # force wildly different predictions
+    spot_check["nuts_beta"] = {  # force wildly different predictions
+        "continuous": [b + 5.0 for b in spot_check["nuts_beta"]["continuous"]],
+        "dow": [b + 5.0 for b in spot_check["nuts_beta"]["dow"]],
+        "month": [b + 5.0 for b in spot_check["nuts_beta"]["month"]],
+    }
 
     result = run_predictive_agreement_check(model, holdout_df, spot_check)
     assert result["licensed"] is False

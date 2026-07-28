@@ -138,7 +138,7 @@ def run_predictive_agreement_check(model, holdout_df: pd.DataFrame, spot_check: 
 
     series_keys = spot_check["spot_check_series_keys"]
     category = spot_check["category"]
-    nuts_beta = np.array(spot_check["nuts_beta"])
+    nuts_beta = {block: np.array(values) for block, values in spot_check["nuts_beta"].items()}
     advi_beta = model._posterior_beta_for_category(category)
 
     subset_holdout = holdout_df[holdout_df["series_key"].isin(series_keys)]

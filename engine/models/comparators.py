@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
+import psutil
 import pymc as pm
 
 from engine.models.base import (
@@ -66,6 +67,71 @@ NUTS_SPOT_CHECK_SEED = 42
 
 ADVI_CONVERGENCE_TAIL_FRACTION = 0.10
 ADVI_CONVERGENCE_REL_TOLERANCE = 0.05
+
+# Continuous regressors go into a dense design matrix; day-of-week and
+# month are handled as integer-indexed categorical effects (beta_dow[idx],
+# beta_month[idx]) instead of dense one-hot dummies. Dummies were the
+# actual OOM cause on real fold-scale data: 19 dense float64 columns x
+# 48.1M rows ~= 7.3GB for that block alone, before pandas' construction
+# overhead. Index arrays cost O(n_rows) at 4 bytes/row instead.
+CONTINUOUS_FEATURES = ("event_flag", "snap_flag", "log_price", "trend")
+N_DOW_LEVELS = 7
+N_MONTH_LEVELS = 12
+
+# trend was originally scaled in months-since-training-start, reaching ~60
+# at a 28-day holdout 5 years out. Combined with the default sigma=0.5
+# prior, mean-field ADVI's seed-to-seed point-estimate noise on trend
+# (measured: mu_beta[trend] std ~= its own mean under repeated fits) got
+# exponentiated through that ~60x leverage into WMAPE swings of 31-46%
+# seed-to-seed, and the comparator lost to seasonal naive in 8/10 runs
+# (see comparator_evidence.md's trend-instability investigation). Rescaling
+# trend to fraction-of-training-span puts holdout evaluation near 1.0
+# instead of ~60, and FEATURE_PRIOR_SIGMA tightens trend's own prior --
+# a demand comparator should not believe in large sustained exponential
+# trends by default.
+FEATURE_PRIOR_SIGMA = np.array([0.5, 0.5, 0.5, 0.1])  # aligned with CONTINUOUS_FEATURES order
+
+MAX_FIT_MEMORY_FRACTION = 0.5
+
+
+class InsufficientMemoryError(Exception):
+    """Raised by the pre-fit memory estimator when fit()'s estimated
+    footprint would exceed a safe fraction of currently available RAM.
+    A SIGKILL becomes a one-second refusal with numbers, not an ~10-minute
+    OOM discovered mid-fit (see KNOWN_ISSUES.md)."""
+
+
+def _estimate_fit_memory_bytes(n_rows: int) -> int:
+    """Deliberately conservative: the continuous design matrix (float32),
+    y/offset arrays (float32), and category/dow/month index arrays
+    (int8) scale with n_rows; dow/month do NOT contribute a dense block
+    (that's the whole point of indexed categoricals). A 3x multiplier
+    covers pandas/pytensor construction overhead and ADVI's own working
+    buffers -- not exact, but the entire purpose is to catch the ~10x
+    class of error the dense-dummy design produced, not to be precise."""
+    bytes_per_row = (
+        len(CONTINUOUS_FEATURES) * 4  # continuous design matrix, float32
+        + 4  # offset, float32
+        + 4  # y, float32
+        + 1  # category index, int8
+        + 1  # dow index, int8
+        + 1  # month index, int8
+    )
+    return int(n_rows * bytes_per_row * 3)
+
+
+def _check_fit_memory(n_rows: int, max_fraction: float = MAX_FIT_MEMORY_FRACTION) -> dict:
+    estimated = _estimate_fit_memory_bytes(n_rows)
+    available = psutil.virtual_memory().available
+    budget = available * max_fraction
+    if estimated > budget:
+        raise InsufficientMemoryError(
+            f"Estimated fit() memory ({estimated / 1e9:.2f} GB) exceeds {max_fraction:.0%} "
+            f"of currently available RAM ({available / 1e9:.2f} GB, budget {budget / 1e9:.2f} GB) "
+            f"for n_rows={n_rows:,}. Refusing to start -- this would very likely be OOM-killed "
+            f"partway through, wasting the fit time instead of failing loud immediately."
+        )
+    return {"estimated_bytes": estimated, "available_bytes": available, "budget_bytes": budget}
 
 
 class ADVIConvergenceError(Exception):
@@ -112,14 +178,19 @@ def _active_span_offset(y: np.ndarray) -> float:
     return float(np.log(mean_active))
 
 
-def _build_features(df: pd.DataFrame, feature_names: list[str] | None = None) -> pd.DataFrame:
-    dow_dummies = pd.get_dummies(df["dow"], prefix="dow").astype(float)
-    month_dummies = pd.get_dummies(df["month"], prefix="month").astype(float)
-    base = df[["event_flag", "snap_flag", "log_price", "trend"]].astype(float).reset_index(drop=True)
-    X = pd.concat([base, dow_dummies.reset_index(drop=True), month_dummies.reset_index(drop=True)], axis=1)
-    if feature_names is not None:
-        X = X.reindex(columns=feature_names, fill_value=0.0)
-    return X
+def _build_continuous_features(df: pd.DataFrame) -> np.ndarray:
+    """Dense (n_rows, 4) float32 matrix for the continuous regressors
+    only -- dow/month are handled as integer indices, never materialised
+    as dense dummy columns (see module docstring / CONTINUOUS_FEATURES)."""
+    return df[list(CONTINUOUS_FEATURES)].astype(np.float32).to_numpy()
+
+
+def _dow_index(df: pd.DataFrame) -> np.ndarray:
+    return df["dow"].to_numpy(dtype=np.int8)
+
+
+def _month_index(df: pd.DataFrame) -> np.ndarray:
+    return (df["month"].to_numpy(dtype=np.int8) - 1)  # month is 1-12; index 0-11
 
 
 @register
@@ -144,8 +215,11 @@ class BayesGLMPooled(ForecastModel):
         self._series_category: dict[SeriesKey, str] = {}
         self._identifiability_note = "not evaluated"
         self._nuts_spot_check: dict | None = None
+        self._training_span_days: int = 1
 
-    def fit(self, panel: PanelData, config: ModelConfig, run_nuts_spot_check: bool = True) -> FitResult:
+    def fit(
+        self, panel: PanelData, config: ModelConfig, run_nuts_spot_check: bool = True, advi_seed: int = 42
+    ) -> FitResult:
         df = panel.df.copy()
         counts = df.groupby("series_key").size()
         too_short = counts[counts < self.min_history_days]
@@ -176,7 +250,10 @@ class BayesGLMPooled(ForecastModel):
         df["offset"] = df["series_key"].map(offsets)
         df["dow"] = df["ds"].dt.dayofweek
         df["month"] = df["ds"].dt.month
-        df["trend"] = ((df["ds"] - df["ds"].min()).dt.days.astype(float)) / 30.0
+        # fraction-of-training-span, not months-since-start (see
+        # FEATURE_PRIOR_SIGMA comment): holdout sits near 1.0, not ~60.
+        self._training_span_days = max(int((df["ds"].max() - df["ds"].min()).days), 1)
+        df["trend"] = ((df["ds"] - df["ds"].min()).dt.days.astype(float)) / self._training_span_days
         df["log_price"] = np.log(df["price"].astype(float).clip(lower=1e-3)).fillna(0.0)
 
         # Co-firing identifiability check (E5): near-zero coefficient on a
@@ -195,24 +272,42 @@ class BayesGLMPooled(ForecastModel):
 
         categories_sorted = sorted(df["category"].unique())
         self._category_codes = {c: i for i, c in enumerate(categories_sorted)}
-        cat_idx = df["category"].map(self._category_codes).to_numpy()
+        cat_idx = df["category"].map(self._category_codes).to_numpy(dtype=np.int8)
         n_categories = len(categories_sorted)
 
-        X = _build_features(df)
-        self._feature_names = list(X.columns)
-        X_arr = X.to_numpy(dtype=float)
-        y_arr = df["y"].to_numpy(dtype=float)
-        offset_arr = df["offset"].to_numpy(dtype=float)
+        _check_fit_memory(len(df))
+
+        self._feature_names = list(CONTINUOUS_FEATURES)  # kept for backward compatibility with callers/tests
+        X_cont = _build_continuous_features(df)  # float32, (n, 4) -- dow/month are NOT dense here
+        dow_idx = _dow_index(df)
+        month_idx = _month_index(df)
+        y_arr = df["y"].to_numpy(dtype=np.float32)
+        offset_arr = df["offset"].to_numpy(dtype=np.float32)
 
         with pm.Model() as model:
-            mu_beta = pm.Normal("mu_beta", mu=0.0, sigma=0.5, shape=X_arr.shape[1])
+            mu_beta = pm.Normal("mu_beta", mu=0.0, sigma=FEATURE_PRIOR_SIGMA, shape=len(CONTINUOUS_FEATURES))
             sigma_beta = pm.HalfNormal("sigma_beta", sigma=0.5)
-            beta_offset_rv = pm.Normal("beta_offset", mu=0.0, sigma=1.0, shape=(n_categories, X_arr.shape[1]))
+            beta_offset_rv = pm.Normal("beta_offset", mu=0.0, sigma=1.0, shape=(n_categories, len(CONTINUOUS_FEATURES)))
             beta = mu_beta + sigma_beta * beta_offset_rv  # non-centred, zero-centred priors
+
+            mu_dow = pm.Normal("mu_dow", mu=0.0, sigma=0.5, shape=N_DOW_LEVELS)
+            sigma_dow = pm.HalfNormal("sigma_dow", sigma=0.5)
+            dow_offset_rv = pm.Normal("dow_offset", mu=0.0, sigma=1.0, shape=(n_categories, N_DOW_LEVELS))
+            beta_dow = mu_dow + sigma_dow * dow_offset_rv
+
+            mu_month = pm.Normal("mu_month", mu=0.0, sigma=0.5, shape=N_MONTH_LEVELS)
+            sigma_month = pm.HalfNormal("sigma_month", sigma=0.5)
+            month_offset_rv = pm.Normal("month_offset", mu=0.0, sigma=1.0, shape=(n_categories, N_MONTH_LEVELS))
+            beta_month = mu_month + sigma_month * month_offset_rv
 
             alpha = pm.HalfNormal("alpha", sigma=2.0)
 
-            eta = offset_arr + pm.math.sum(beta[cat_idx] * X_arr, axis=1)
+            eta = (
+                offset_arr
+                + pm.math.sum(beta[cat_idx] * X_cont, axis=1)
+                + beta_dow[cat_idx, dow_idx]
+                + beta_month[cat_idx, month_idx]
+            )
             eta_clipped = pm.math.clip(eta, -10, 10)
             mu = pm.math.exp(eta_clipped)
 
@@ -223,11 +318,11 @@ class BayesGLMPooled(ForecastModel):
                 n=ADVI_ITERATIONS,
                 method="advi",
                 progressbar=False,
-                random_seed=42,
+                random_seed=advi_seed,
                 obj_optimizer=pm.adam(learning_rate=ADVI_LEARNING_RATE),
             )
             advi_convergence_rel_change = _check_advi_convergence(approx.hist)
-            trace = approx.sample(POSTERIOR_DRAWS)
+            trace = approx.sample(POSTERIOR_DRAWS, random_seed=advi_seed)
 
         self._family = family_from_fitted_object
         self._trace = trace
@@ -238,7 +333,7 @@ class BayesGLMPooled(ForecastModel):
         # (see module docstring for why); skippable via run_nuts_spot_check
         # for fold runs where it's only meant to happen once, not per fold.
         if run_nuts_spot_check:
-            self._nuts_spot_check = self._run_nuts_spot_check(df, categories_sorted[0], X_arr.shape[1])
+            self._nuts_spot_check = self._run_nuts_spot_check(df, categories_sorted[0])
         else:
             self._nuts_spot_check = {"ran": False, "reason": "run_nuts_spot_check=False for this fit"}
 
@@ -264,7 +359,6 @@ class BayesGLMPooled(ForecastModel):
         self,
         df: pd.DataFrame,
         spot_category: str,
-        n_features: int,
         max_rows: int = NUTS_SPOT_CHECK_MAX_ROWS,
         seed: int = NUTS_SPOT_CHECK_SEED,
     ) -> dict:
@@ -273,8 +367,9 @@ class BayesGLMPooled(ForecastModel):
         category's rows -- capped to `max_rows` via a seeded, whole-series
         subsample (never a bare row sample, which would mix partial series)
         so the spot-check's cost is bounded regardless of the fold's actual
-        population size -- and compares its mean coefficient vector to
-        ADVI's for the same category."""
+        population size -- and compares its mean coefficient vector (same
+        continuous + indexed-dow + indexed-month structure as the main
+        fit) to ADVI's for the same category."""
         subset = df[df["category"] == spot_category]
         if len(subset) < self.min_history_days:
             return {"ran": False, "reason": f"category {spot_category!r} too small for a spot-check"}
@@ -289,30 +384,40 @@ class BayesGLMPooled(ForecastModel):
             n_series_to_keep = max(1, int(max_rows / rows_per_series))
             subset = subset[subset["series_key"].isin(set(series_keys[:n_series_to_keep]))]
 
-        X = _build_features(subset, feature_names=self._feature_names).to_numpy(dtype=float)
-        y = subset["y"].to_numpy(dtype=float)
-        offset = subset["offset"].to_numpy(dtype=float)
+        X_cont = _build_continuous_features(subset)
+        dow_idx = _dow_index(subset)
+        month_idx = _month_index(subset)
+        y = subset["y"].to_numpy(dtype=np.float32)
+        offset = subset["offset"].to_numpy(dtype=np.float32)
 
         try:
             with pm.Model():
-                beta = pm.Normal("beta", mu=0.0, sigma=1.0, shape=n_features)
+                beta_cont = pm.Normal("beta_cont", mu=0.0, sigma=FEATURE_PRIOR_SIGMA * 2, shape=len(CONTINUOUS_FEATURES))
+                beta_dow = pm.Normal("beta_dow", mu=0.0, sigma=1.0, shape=N_DOW_LEVELS)
+                beta_month = pm.Normal("beta_month", mu=0.0, sigma=1.0, shape=N_MONTH_LEVELS)
                 alpha = pm.HalfNormal("alpha", sigma=2.0)
-                eta = pm.math.clip(offset + pm.math.sum(beta * X, axis=1), -10, 10)
+                eta = pm.math.clip(
+                    offset + pm.math.sum(beta_cont * X_cont, axis=1) + beta_dow[dow_idx] + beta_month[month_idx],
+                    -10,
+                    10,
+                )
                 mu = pm.math.exp(eta)
                 pm.NegativeBinomial("y_obs", mu=mu, alpha=alpha, observed=y)
                 nuts_trace = pm.sample(
                     draws=200, tune=200, chains=1, progressbar=False, random_seed=42,
                     compute_convergence_checks=False,
                 )
-            nuts_beta_mean = nuts_trace.posterior["beta"].mean(dim=("chain", "draw")).values
+            nuts_beta = {
+                "continuous": nuts_trace.posterior["beta_cont"].mean(dim=("chain", "draw")).values.tolist(),
+                "dow": nuts_trace.posterior["beta_dow"].mean(dim=("chain", "draw")).values.tolist(),
+                "month": nuts_trace.posterior["beta_month"].mean(dim=("chain", "draw")).values.tolist(),
+            }
 
-            cat_idx = self._category_codes[spot_category]
-            advi_beta_mean = (
-                self._trace.posterior["mu_beta"].mean(dim=("chain", "draw")).values
-                + self._trace.posterior["sigma_beta"].mean(dim=("chain", "draw")).values
-                * self._trace.posterior["beta_offset"].mean(dim=("chain", "draw")).values[cat_idx]
-            )
-            mean_abs_diff = float(np.mean(np.abs(nuts_beta_mean - advi_beta_mean)))
+            advi_beta = self._posterior_beta_for_category(spot_category)
+            nuts_flat = np.concatenate([nuts_beta["continuous"], nuts_beta["dow"], nuts_beta["month"]])
+            advi_flat = np.concatenate([advi_beta["continuous"], advi_beta["dow"], advi_beta["month"]])
+            mean_abs_diff = float(np.mean(np.abs(nuts_flat - advi_flat)))
+
             return {
                 "ran": True,
                 "category": spot_category,
@@ -326,7 +431,7 @@ class BayesGLMPooled(ForecastModel):
                 # the decisive check, since the gate compares predictions,
                 # not posteriors.
                 "spot_check_series_keys": sorted(subset["series_key"].unique().tolist()),
-                "nuts_beta": nuts_beta_mean.tolist(),
+                "nuts_beta": nuts_beta,
             }
         except Exception as exc:  # NUTS spot-check is a diagnostic, not load-bearing for the fit itself
             return {"ran": False, "reason": f"NUTS spot-check failed: {exc}"}
@@ -337,43 +442,80 @@ class BayesGLMPooled(ForecastModel):
         structurally never attain 1.0 within the fitted data (e.g. a
         heavily-decayed adstock or a log-price column whose range excludes
         1.0) -- reported as "not attainable" there rather than a misleading
-        number computed off the support of the data."""
+        number computed off the support of the data.
+
+        dow/month are indexed categoricals in the model itself (never a
+        dense dummy matrix -- see module docstring), but this report still
+        expresses their exposure the same way an old-style 0/1 dummy would
+        (is this row that day/month?), purely for reporting: it makes the
+        reported numbers directly comparable to the pre-refactor evidence
+        table (see comparator_evidence.md's equivalence proof)."""
         if self._trace is None:
             raise RuntimeError(f"{self.model_id}.coefficient_plausibility_report() called before fit()")
 
-        X = _build_features(self._fit_df, feature_names=self._feature_names)
         mu_beta = self._trace.posterior["mu_beta"].mean(dim=("chain", "draw")).values
+        mu_dow = self._trace.posterior["mu_dow"].mean(dim=("chain", "draw")).values
+        mu_month = self._trace.posterior["mu_month"].mean(dim=("chain", "draw")).values
 
         rows = []
-        for i, feature_name in enumerate(self._feature_names):
-            values = X[feature_name].to_numpy(dtype=float)
-            median_val = float(np.median(values))
-            p90_val = float(np.quantile(values, 0.9))
-            beta_i = float(mu_beta[i])
 
-            attainable_at_1 = bool(values.min() <= 1.0 <= values.max())
-            effect_at_1 = float(np.exp(beta_i * 1.0)) if attainable_at_1 else "not attainable"
+        X_cont = _build_continuous_features(self._fit_df)
+        for i, feature_name in enumerate(CONTINUOUS_FEATURES):
+            values = X_cont[:, i].astype(float)
+            rows.append(self._plausibility_row(feature_name, float(mu_beta[i]), values))
 
-            rows.append(
-                {
-                    "feature": feature_name,
-                    "beta_pooled": beta_i,
-                    "median_exposure": median_val,
-                    "effect_at_median": float(np.exp(beta_i * median_val)),
-                    "p90_exposure": p90_val,
-                    "effect_at_p90": float(np.exp(beta_i * p90_val)),
-                    "feature_eq_1_attainable": attainable_at_1,
-                    "effect_at_1": effect_at_1,
-                }
-            )
+        dow_values = self._fit_df["dow"].to_numpy()
+        for level in range(N_DOW_LEVELS):
+            indicator = (dow_values == level).astype(float)
+            rows.append(self._plausibility_row(f"dow_{level}", float(mu_dow[level]), indicator))
+
+        month_values = self._fit_df["month"].to_numpy()
+        for level in range(1, N_MONTH_LEVELS + 1):
+            indicator = (month_values == level).astype(float)
+            rows.append(self._plausibility_row(f"month_{level}", float(mu_month[level - 1]), indicator))
+
         return pd.DataFrame(rows)
 
-    def _posterior_beta_for_category(self, category: str) -> np.ndarray:
+    @staticmethod
+    def _plausibility_row(feature_name: str, beta_i: float, values: np.ndarray) -> dict:
+        median_val = float(np.median(values))
+        p90_val = float(np.quantile(values, 0.9))
+        attainable_at_1 = bool(values.min() <= 1.0 <= values.max())
+        effect_at_1 = float(np.exp(beta_i * 1.0)) if attainable_at_1 else "not attainable"
+        return {
+            "feature": feature_name,
+            "beta_pooled": beta_i,
+            "median_exposure": median_val,
+            "effect_at_median": float(np.exp(beta_i * median_val)),
+            "p90_exposure": p90_val,
+            "effect_at_p90": float(np.exp(beta_i * p90_val)),
+            "feature_eq_1_attainable": attainable_at_1,
+            "effect_at_1": effect_at_1,
+        }
+
+    def _posterior_beta_for_category(self, category: str) -> dict[str, np.ndarray]:
+        """Returns {"continuous": (4,), "dow": (7,), "month": (12,)} for
+        the given category -- the model's beta is now split into these
+        three indexed blocks rather than one dense vector (see module
+        docstring for why)."""
         cat_idx = self._category_codes.get(category, 0)
         mu_beta = self._trace.posterior["mu_beta"].mean(dim=("chain", "draw")).values
         sigma_beta = self._trace.posterior["sigma_beta"].mean(dim=("chain", "draw")).values
         beta_offset = self._trace.posterior["beta_offset"].mean(dim=("chain", "draw")).values
-        return mu_beta + sigma_beta * beta_offset[cat_idx]
+
+        mu_dow = self._trace.posterior["mu_dow"].mean(dim=("chain", "draw")).values
+        sigma_dow = self._trace.posterior["sigma_dow"].mean(dim=("chain", "draw")).values
+        dow_offset = self._trace.posterior["dow_offset"].mean(dim=("chain", "draw")).values
+
+        mu_month = self._trace.posterior["mu_month"].mean(dim=("chain", "draw")).values
+        sigma_month = self._trace.posterior["sigma_month"].mean(dim=("chain", "draw")).values
+        month_offset = self._trace.posterior["month_offset"].mean(dim=("chain", "draw")).values
+
+        return {
+            "continuous": mu_beta + sigma_beta * beta_offset[cat_idx],
+            "dow": mu_dow + sigma_dow * dow_offset[cat_idx],
+            "month": mu_month + sigma_month * month_offset[cat_idx],
+        }
 
     def _future_feature_frame(self, horizon: int, future_covariates: PanelData | None) -> pd.DataFrame:
         last_ds = self._fit_df["ds"].max()
@@ -391,7 +533,7 @@ class BayesGLMPooled(ForecastModel):
 
         fut["dow"] = fut["ds"].dt.dayofweek
         fut["month"] = fut["ds"].dt.month
-        fut["trend"] = ((fut["ds"] - self._fit_df["ds"].min()).dt.days.astype(float)) / 30.0
+        fut["trend"] = ((fut["ds"] - self._fit_df["ds"].min()).dt.days.astype(float)) / self._training_span_days
         fut["log_price"] = np.log(fut["price"].astype(float).clip(lower=1e-3)).fillna(0.0)
         return fut
 
@@ -399,16 +541,17 @@ class BayesGLMPooled(ForecastModel):
         self,
         series_key: SeriesKey,
         future_dates: pd.DatetimeIndex,
-        beta: np.ndarray,
+        beta: dict[str, np.ndarray],
         future_covariates: pd.DataFrame | None = None,
     ) -> np.ndarray:
-        """yhat for one series using an EXPLICIT beta vector -- the shared
-        core of both the normal ADVI-posterior-mean prediction path
-        (_predict_all) and the predictive-agreement check, which compares
-        predictions from ADVI's beta against the NUTS spot-check's own
-        beta on the same series/dates. Never duplicate this feature-
-        building logic per caller -- a divergence here would make the
-        agreement check meaningless."""
+        """yhat for one series using an EXPLICIT beta dict
+        ({"continuous", "dow", "month"}) -- the shared core of both the
+        normal ADVI-posterior-mean prediction path (_predict_all) and the
+        predictive-agreement check, which compares predictions from
+        ADVI's beta against the NUTS spot-check's own beta on the same
+        series/dates. Never duplicate this feature-building logic per
+        caller -- a divergence here would make the agreement check
+        meaningless."""
         offset = self._series_offset[series_key]
         per_series_covariates = future_covariates is not None and "series_key" in future_covariates.columns
 
@@ -426,11 +569,18 @@ class BayesGLMPooled(ForecastModel):
 
         fut["dow"] = fut["ds"].dt.dayofweek
         fut["month"] = fut["ds"].dt.month
-        fut["trend"] = ((fut["ds"] - self._fit_df["ds"].min()).dt.days.astype(float)) / 30.0
+        fut["trend"] = ((fut["ds"] - self._fit_df["ds"].min()).dt.days.astype(float)) / self._training_span_days
         fut["log_price"] = np.log(fut["price"].astype(float).clip(lower=1e-3)).fillna(0.0)
 
-        X_future = _build_features(fut, feature_names=self._feature_names).to_numpy(dtype=float)
-        eta = np.clip(offset + X_future @ beta, -10, 10)
+        X_cont = _build_continuous_features(fut)
+        dow_idx = _dow_index(fut)
+        month_idx = _month_index(fut)
+
+        beta_cont = np.asarray(beta["continuous"], dtype=float)
+        beta_dow = np.asarray(beta["dow"], dtype=float)
+        beta_month = np.asarray(beta["month"], dtype=float)
+
+        eta = np.clip(offset + X_cont @ beta_cont + beta_dow[dow_idx] + beta_month[month_idx], -10, 10)
         yhat = np.exp(eta)
         if np.any(np.isnan(yhat)):
             raise NaNOutputError(f"{self.model_id}: prediction produced NaN output for series {series_key}")
@@ -474,10 +624,12 @@ class BayesGLMPooled(ForecastModel):
         offset = self._series_offset[series_key]
 
         fut = self._future_feature_frame(horizon, future_covariates)
-        X_future = _build_features(fut, feature_names=self._feature_names).to_numpy(dtype=float)
+        X_cont = _build_continuous_features(fut)
+        dow_idx = _dow_index(fut)
+        month_idx = _month_index(fut)
         beta = self._posterior_beta_for_category(category)
 
-        eta = np.clip(offset + X_future @ beta, -10, 10)
+        eta = np.clip(offset + X_cont @ beta["continuous"] + beta["dow"][dow_idx] + beta["month"][month_idx], -10, 10)
         yhat = np.exp(eta)
 
         if np.any(np.isnan(yhat)):
@@ -526,16 +678,17 @@ class BayesGLMPooled(ForecastModel):
         mask = (series_df["ds"].dt.date >= date_range.start) & (series_df["ds"].dt.date <= date_range.end)
         windowed = series_df.loc[mask] if mask.any() else series_df
 
-        X_window = _build_features(windowed, feature_names=self._feature_names).to_numpy(dtype=float)
-        covariate_contribution = float(np.mean(X_window @ beta)) if len(X_window) else 0.0
+        X_window = _build_continuous_features(windowed) if len(windowed) else np.empty((0, len(CONTINUOUS_FEATURES)))
+        covariate_contribution = float(np.mean(X_window @ beta["continuous"])) if len(X_window) else 0.0
         level = float(np.exp(offset))
 
-        trend_idx = self._feature_names.index("trend")
-        trend_contribution = float(beta[trend_idx] * windowed["trend"].mean()) if len(windowed) else 0.0
-        dow_indices = [i for i, name in enumerate(self._feature_names) if name.startswith("dow_")]
-        seasonality_contribution = float(np.mean(beta[dow_indices])) if dow_indices else 0.0
+        trend_idx = CONTINUOUS_FEATURES.index("trend")
+        trend_contribution = float(beta["continuous"][trend_idx] * windowed["trend"].mean()) if len(windowed) else 0.0
+        seasonality_contribution = float(np.mean(beta["dow"]))
 
         alpha_mean = float(self._trace.posterior["alpha"].mean().values)
+
+        event_idx = CONTINUOUS_FEATURES.index("event_flag")
 
         return Explanation(
             series_key=series_key,
@@ -549,7 +702,7 @@ class BayesGLMPooled(ForecastModel):
             },
             drivers=[
                 {"name": "active_span_offset", "direction": "level", "magnitude": level, "confidence": "posterior mean"},
-                {"name": "event_flag", "direction": "n/a", "magnitude": float(beta[self._feature_names.index("event_flag")]), "confidence": self._identifiability_note},
+                {"name": "event_flag", "direction": "n/a", "magnitude": float(beta["continuous"][event_idx]), "confidence": self._identifiability_note},
             ],
             narrative_facts=[
                 f"Family: {self._family} (read from the fitted object, not a config string).",
@@ -624,6 +777,7 @@ class BayesGLMPooled(ForecastModel):
                     "series_category": self._series_category,
                     "identifiability_note": self._identifiability_note,
                     "nuts_spot_check": self._nuts_spot_check,
+                    "training_span_days": self._training_span_days,
                 },
                 f,
             )
@@ -645,4 +799,5 @@ class BayesGLMPooled(ForecastModel):
         instance._series_category = state["series_category"]
         instance._identifiability_note = state["identifiability_note"]
         instance._nuts_spot_check = state["nuts_spot_check"]
+        instance._training_span_days = state["training_span_days"]
         return instance

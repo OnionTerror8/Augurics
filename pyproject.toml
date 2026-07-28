@@ -17,6 +17,7 @@ dependencies = [
     "pytest",
     "kaggle",
     "pyyaml",
+    "psutil",
 ]
 
 [tool.hatch.build.targets.wheel]

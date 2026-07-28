@@ -86,7 +86,7 @@ def test_coefficient_plausibility_report_uses_median_and_p90_of_observed_data():
     trend_row = report[report["feature"] == "trend"].iloc[0]
 
     fit_df = model._fit_df
-    expected_trend = ((fit_df["ds"] - fit_df["ds"].min()).dt.days.astype(float)) / 30.0
+    expected_trend = ((fit_df["ds"] - fit_df["ds"].min()).dt.days.astype(float)) / model._training_span_days
     assert trend_row["median_exposure"] == pytest.approx(float(np.median(expected_trend)))
     assert trend_row["p90_exposure"] == pytest.approx(float(np.quantile(expected_trend, 0.9)))
 
@@ -168,7 +168,7 @@ def test_nuts_spot_check_caps_to_max_rows_via_whole_series_subsample():
     model = BayesGLMPooled()
     fit_result = model.fit(PanelData(df=df), _default_config())
 
-    spot_check = model._run_nuts_spot_check(model._fit_df, "FOODS", n_features=len(model._feature_names), max_rows=200)
+    spot_check = model._run_nuts_spot_check(model._fit_df, "FOODS", max_rows=200)
     assert spot_check["ran"] is True
     assert spot_check["capped"] is True
     assert spot_check["original_category_rows"] == 600
@@ -180,7 +180,7 @@ def test_nuts_spot_check_does_not_cap_when_under_max_rows():
     model = BayesGLMPooled()
     model.fit(PanelData(df=df), _default_config())
 
-    spot_check = model._run_nuts_spot_check(model._fit_df, "FOODS", n_features=len(model._feature_names), max_rows=1_000_000)
+    spot_check = model._run_nuts_spot_check(model._fit_df, "FOODS", max_rows=1_000_000)
     assert spot_check["ran"] is True
     assert spot_check["capped"] is False
     assert spot_check["spot_check_rows"] == spot_check["original_category_rows"] == 180
