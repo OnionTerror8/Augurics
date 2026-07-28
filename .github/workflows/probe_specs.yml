@@ -1,4 +1,4 @@
-name: runner-spec-probe
+name: probe-specs
 
 on:
   workflow_dispatch: {}
