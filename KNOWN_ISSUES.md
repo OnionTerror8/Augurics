@@ -2,6 +2,38 @@
 
 Tracked but not yet fixed. Add new entries at the top.
 
+## RULED OUT (verified, not assumed): GitHub Actions private-repo runners cannot run the comparator batch (2026-07-28)
+
+Considered as an alternative to a manually-provisioned VM (`PROVISIONING.md`)
+for the real 4-fold comparator batch. Verified directly rather than
+assumed from docs:
+
+- This repo (`OnionTerror8/Augurics`) is **private**, so it does NOT
+  get the free 4-vCPU/16GB public-repo runner upgrade -- confirmed via
+  `gh repo view --json visibility`.
+- A throwaway `workflow_dispatch` probe job (`free -h`, `/proc/meminfo`,
+  `psutil.virtual_memory()`, run once and deleted) confirmed the actual
+  standard private-repo runner: **2 vCPU, 8.3GB total RAM, 7.4GB
+  available at job start** (before installing any project
+  dependencies).
+- Measuring fold 1's actual cached train DataFrame
+  (`data/fold_cache/comparator/fold1_train.parquet`, 48.1M rows) with
+  `df.memory_usage(deep=True)` gives **7.19GB** for the base 7-column
+  frame alone -- dominated by `series_key` and `category` as
+  object-dtype string columns (3.26GB + 2.68GB). `fit()`'s first line
+  (`df = panel.df.copy()`) doubles this to ~14.4GB immediately, before
+  any feature engineering, the holdout frame, PyMC's own graph, or the
+  `_check_fit_memory` estimate (3.90GB) enter the picture.
+
+Not a close call to tune `MAX_FIT_MEMORY_FRACTION` around: the runner
+would be OOM-killed on the DataFrame copy alone, at roughly half the
+RAM this workload needs just to hold the data. GitHub's paid "larger
+runners" (up to 64 vCPU/256GB) exist but require a Team/Enterprise
+plan with billing, not available on the Free plan this repo is on --
+functionally the same cost/commitment tradeoff as `PROVISIONING.md`'s
+VM route, with less control over the environment. Decision: proceed
+with the VM route as already documented.
+
 ## CLOSED, working as designed: pre-fit memory estimator's first live catch forced a move to cloud compute (2026-07-28)
 
 The real fold-1 launch (post-OOM-refactor, see the entry below) hit
