@@ -2,6 +2,67 @@
 
 Tracked but not yet fixed. Add new entries at the top.
 
+## COMPUTE HOST CHANGE: Kaggle Notebooks verified viable, supersedes the VM plan for now (2026-07-28)
+
+Verified before committing to it, not assumed: Kaggle Notebooks'
+CPU-only runtime is **32GB RAM, 12-hour session limit**, and "Save &
+Run All (Commit)" runs as a background batch job on Kaggle's own
+infrastructure that persists after closing the browser -- exactly the
+unattended-multi-hour-run requirement `PROVISIONING.md`'s VM route was
+built for. 32GB clears both outstanding estimates with large headroom:
+the comparator's 3.90GB (`engine.models.comparators.
+_estimate_fit_memory_bytes`) and the challenger's 5.13GB (`engine.
+models.ml.estimate_challenger_fit_memory_bytes`, see the entry below).
+M5 is a Kaggle competition dataset, so it can be attached directly to
+a notebook via "Add Data" -- eliminating `PROVISIONING.md`'s
+data-transfer step entirely, not just relocating it.
+
+Not a replacement for `PROVISIONING.md` (kept, in case Kaggle disappoints
+in practice) but the current preferred path: free, zero data transfer,
+already-clear memory headroom. See `KAGGLE_PROVISIONING.md` for the
+entrypoint sequence. Fallback if this doesn't pan out in practice:
+GitHub Codespaces free tier (4-core/16GB, ~30 core-hours/month).
+
+## INVESTIGATED, NOT PURSUED: minibatch ADVI for the comparator (2026-07-28)
+
+Assessed as a possible way to remove the VM dependency for the
+comparator batch specifically. Built fold 1's real arrays and wired up
+`pm.Minibatch` rather than estimating from a formula. Two concrete
+findings against pursuing it:
+
+1. **Doesn't address the actual bottleneck.** `pm.Minibatch` wraps
+   arrays already resident in memory -- it shrinks the per-iteration
+   compute graph (the source of the estimator's 3x safety multiplier),
+   not the base memory of holding the full fold's arrays. Measured RSS
+   after just building the raw arrays, before any ADVI iteration:
+   **3.48GB** -- already close to the full-batch estimate (3.90GB). A
+   leaner implementation (dropping the intermediate DataFrame after
+   array extraction) might land nearer 1.5-2GB, but that's a modest,
+   uncertain gain, still inside this laptop's volatile 1.7-7.4GB
+   available-RAM range observed all session -- not a guarantee.
+2. **Hit a real PyMC API wall immediately.**
+   `NegativeBinomial(..., observed=y_mb, total_size=n_rows)` where
+   `y_mb` comes from `pm.Minibatch(...)` fails outright: "Variables
+   that depend on other nodes cannot be used for observed data." Not a
+   drop-in swap; needs real debugging of how PyMC expects a minibatch
+   observed-variable to be constructed in this version.
+3. **Reopens the exact risk just closed.** Minibatch SGD adds another
+   layer of stochasticity (which rows get sampled per iteration) on
+   top of ADVI's own optimiser noise, for a model that just needed a
+   real fix (`trend`, comparator_evidence.md §7) because its point
+   estimates were more fragile than assumed. A minibatch version would
+   need its own full E2 equivalence proof (5-seed stability +
+   predictive agreement vs full-batch, at the 182-series sample scale)
+   before being trustworthy for gate numbers -- essentially repeating
+   tonight's investigation, not skipping it.
+4. **Wouldn't help the challenger at all** -- LightGBM's 5.13GB
+   estimate is driven by feature-matrix width, unrelated to ADVI
+   minibatching.
+
+Decision: not pursued. The VM route (`PROVISIONING.md`) remains the
+plan for both the comparator and the challenger; see the newer entry
+above for the current compute-host investigation (Kaggle Notebooks).
+
 ## DEFERRED (verified infeasible on this laptop): challenger (Rung 2 lgbm) training, task 2.3 (2026-07-28)
 
 Checked feasibility BEFORE training anything, per the same discipline

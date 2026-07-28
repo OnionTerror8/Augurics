@@ -16,6 +16,7 @@ import pytest
 
 import engine.models.baselines  # noqa: F401  -- side effect: registers Rung 1 baselines
 import engine.models.comparators  # noqa: F401  -- side effect: registers bayes_glm_pooled
+import engine.models.ml  # noqa: F401  -- side effect: registers lgbm_promo_v1
 from engine.models.base import (
     DateRange,
     ForecastModel,

@@ -59,7 +59,7 @@ def add_price_features(
     minus the PRIOR row's price (diff), so it depends only on t and t-1,
     never on t+1 or later."""
     out = _sorted(df, ds_col, group_col)
-    out["log_price"] = np.log(out[price_col].astype(float).clip(lower=1e-3))
+    out["log_price"] = np.log(out[price_col].astype(float).clip(lower=1e-3)).fillna(0.0)
     if group_col and group_col in out.columns:
         out["price_change"] = out.groupby(group_col)[price_col].diff().fillna(0.0)
     else:
