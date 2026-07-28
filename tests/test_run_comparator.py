@@ -80,3 +80,74 @@ def test_score_comparator_with_nuts_spot_check_enabled():
     result = score_comparator(train_df, holdout_df, holdout_days=7, run_nuts_spot_check=True)
     assert result["nuts_spot_check"]["ran"] is True
     assert "mean_abs_coef_diff_advi_vs_nuts" in result["nuts_spot_check"]
+    assert result["predictive_agreement"] is not None
+    assert "advi_wmape" in result["predictive_agreement"]
+    assert "nuts_wmape" in result["predictive_agreement"]
+    assert "relative_difference" in result["predictive_agreement"]
+
+
+def test_predictive_agreement_check_licenses_when_within_tolerance():
+    from engine.backtest.run_comparator import run_predictive_agreement_check
+    from engine.models.comparators import BayesGLMPooled
+    from engine.models.base import PanelData, ModelConfig
+
+    train_df, holdout_df = _make_frames(n_series=4, train_days=60, holdout_days=7)
+    model = BayesGLMPooled()
+    fit_result = model.fit(
+        PanelData(df=train_df),
+        ModelConfig(hyperparams={}, feature_set="none", vertical_profile="retail", horizon=7),
+        run_nuts_spot_check=True,
+    )
+    spot_check = fit_result.diagnostics["nuts_spot_check"]
+    assert spot_check["ran"] is True
+
+    result = run_predictive_agreement_check(model, holdout_df, spot_check)
+    assert result["category"] == spot_check["category"]
+    assert result["n_series"] == len(spot_check["spot_check_series_keys"])
+    assert isinstance(result["licensed"], bool)
+
+
+def test_predictive_agreement_check_detects_forced_divergence():
+    """Force the NUTS beta to something wildly different from ADVI's and
+    confirm the check itself reports non-licensed with a large relative
+    difference -- the deterministic case for the decisive stop condition."""
+    from engine.backtest.run_comparator import run_predictive_agreement_check
+    from engine.models.comparators import BayesGLMPooled
+    from engine.models.base import PanelData, ModelConfig
+
+    train_df, holdout_df = _make_frames(n_series=4, train_days=60, holdout_days=7)
+    model = BayesGLMPooled()
+    fit_result = model.fit(
+        PanelData(df=train_df),
+        ModelConfig(hyperparams={}, feature_set="none", vertical_profile="retail", horizon=7),
+        run_nuts_spot_check=True,
+    )
+    spot_check = dict(fit_result.diagnostics["nuts_spot_check"])
+    spot_check["nuts_beta"] = [b + 5.0 for b in spot_check["nuts_beta"]]  # force wildly different predictions
+
+    result = run_predictive_agreement_check(model, holdout_df, spot_check)
+    assert result["licensed"] is False
+    assert result["relative_difference"] > 0.02
+
+
+def test_score_comparator_raises_predictive_agreement_error_when_not_licensed():
+    """score_comparator itself must stop before returning any result when
+    the predictive-agreement check fails -- mocked so this is deterministic
+    rather than depending on a real fit happening to diverge."""
+    from unittest.mock import patch
+
+    from engine.backtest.run_comparator import PredictiveAgreementError
+
+    train_df, holdout_df = _make_frames(n_series=4, train_days=60, holdout_days=7)
+    fake_not_licensed = {
+        "advi_wmape": 0.5,
+        "nuts_wmape": 0.7,
+        "relative_difference": 0.2857,
+        "licensed": False,
+        "category": "FOODS",
+        "n_series": 4,
+        "n_holdout_rows": 28,
+    }
+    with patch("engine.backtest.run_comparator.run_predictive_agreement_check", return_value=fake_not_licensed):
+        with pytest.raises(PredictiveAgreementError, match="NOT licensed"):
+            score_comparator(train_df, holdout_df, holdout_days=7, run_nuts_spot_check=True)

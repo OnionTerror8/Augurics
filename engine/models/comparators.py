@@ -320,6 +320,13 @@ class BayesGLMPooled(ForecastModel):
                 "capped": capped,
                 "original_category_rows": original_rows,
                 "spot_check_rows": len(subset),
+                # Persisted so the orchestration layer can run the
+                # predictive-agreement check (compare ADVI-beta vs
+                # NUTS-beta HOLDOUT predictions for these exact series) --
+                # the decisive check, since the gate compares predictions,
+                # not posteriors.
+                "spot_check_series_keys": sorted(subset["series_key"].unique().tolist()),
+                "nuts_beta": nuts_beta_mean.tolist(),
             }
         except Exception as exc:  # NUTS spot-check is a diagnostic, not load-bearing for the fit itself
             return {"ran": False, "reason": f"NUTS spot-check failed: {exc}"}
@@ -388,6 +395,47 @@ class BayesGLMPooled(ForecastModel):
         fut["log_price"] = np.log(fut["price"].astype(float).clip(lower=1e-3)).fillna(0.0)
         return fut
 
+    def _predict_series_with_beta(
+        self,
+        series_key: SeriesKey,
+        future_dates: pd.DatetimeIndex,
+        beta: np.ndarray,
+        future_covariates: pd.DataFrame | None = None,
+    ) -> np.ndarray:
+        """yhat for one series using an EXPLICIT beta vector -- the shared
+        core of both the normal ADVI-posterior-mean prediction path
+        (_predict_all) and the predictive-agreement check, which compares
+        predictions from ADVI's beta against the NUTS spot-check's own
+        beta on the same series/dates. Never duplicate this feature-
+        building logic per caller -- a divergence here would make the
+        agreement check meaningless."""
+        offset = self._series_offset[series_key]
+        per_series_covariates = future_covariates is not None and "series_key" in future_covariates.columns
+
+        fut = pd.DataFrame({"ds": future_dates})
+        if future_covariates is not None:
+            cov = future_covariates[future_covariates["series_key"] == series_key] if per_series_covariates else future_covariates
+            cov = cov.copy()
+            cov["ds"] = pd.to_datetime(cov["ds"])
+            fut = fut.merge(cov.drop(columns=["series_key"], errors="ignore"), on="ds", how="left")
+
+        for col, default in (("event_flag", 0.0), ("snap_flag", 0.0), ("price", np.nan)):
+            if col not in fut.columns:
+                fut[col] = default
+            fut[col] = fut[col].fillna(default)
+
+        fut["dow"] = fut["ds"].dt.dayofweek
+        fut["month"] = fut["ds"].dt.month
+        fut["trend"] = ((fut["ds"] - self._fit_df["ds"].min()).dt.days.astype(float)) / 30.0
+        fut["log_price"] = np.log(fut["price"].astype(float).clip(lower=1e-3)).fillna(0.0)
+
+        X_future = _build_features(fut, feature_names=self._feature_names).to_numpy(dtype=float)
+        eta = np.clip(offset + X_future @ beta, -10, 10)
+        yhat = np.exp(eta)
+        if np.any(np.isnan(yhat)):
+            raise NaNOutputError(f"{self.model_id}: prediction produced NaN output for series {series_key}")
+        return np.clip(yhat, 0.0, None)
+
     def _predict_all(self, horizon: int, future_covariates: pd.DataFrame | None = None) -> pd.DataFrame:
         """Bulk prediction for every fitted series at once -- not part of
         the ABC contract, used by the per-fold backtest orchestration the
@@ -403,37 +451,11 @@ class BayesGLMPooled(ForecastModel):
 
         last_ds = self._fit_df["ds"].max()
         future_dates = pd.date_range(last_ds + pd.Timedelta(days=1), periods=horizon, freq="D")
-        per_series_covariates = future_covariates is not None and "series_key" in future_covariates.columns
 
         frames = []
         for series_key, category in self._series_category.items():
-            offset = self._series_offset[series_key]
             beta = self._posterior_beta_for_category(category)
-
-            fut = pd.DataFrame({"ds": future_dates})
-            if future_covariates is not None:
-                cov = future_covariates[future_covariates["series_key"] == series_key] if per_series_covariates else future_covariates
-                cov = cov.copy()
-                cov["ds"] = pd.to_datetime(cov["ds"])
-                fut = fut.merge(cov.drop(columns=["series_key"], errors="ignore"), on="ds", how="left")
-
-            for col, default in (("event_flag", 0.0), ("snap_flag", 0.0), ("price", np.nan)):
-                if col not in fut.columns:
-                    fut[col] = default
-                fut[col] = fut[col].fillna(default)
-
-            fut["dow"] = fut["ds"].dt.dayofweek
-            fut["month"] = fut["ds"].dt.month
-            fut["trend"] = ((fut["ds"] - self._fit_df["ds"].min()).dt.days.astype(float)) / 30.0
-            fut["log_price"] = np.log(fut["price"].astype(float).clip(lower=1e-3)).fillna(0.0)
-
-            X_future = _build_features(fut, feature_names=self._feature_names).to_numpy(dtype=float)
-            eta = np.clip(offset + X_future @ beta, -10, 10)
-            yhat = np.exp(eta)
-            if np.any(np.isnan(yhat)):
-                raise NaNOutputError(f"{self.model_id}._predict_all() produced NaN output for series {series_key}")
-            yhat = np.clip(yhat, 0.0, None)
-
+            yhat = self._predict_series_with_beta(series_key, future_dates, beta, future_covariates)
             frames.append(pd.DataFrame({"series_key": [series_key] * horizon, "ds": future_dates, "yhat": yhat}))
 
         return pd.concat(frames, ignore_index=True)
