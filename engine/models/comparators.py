@@ -220,8 +220,20 @@ class BayesGLMPooled(ForecastModel):
     def fit(
         self, panel: PanelData, config: ModelConfig, run_nuts_spot_check: bool = True, advi_seed: int = 42
     ) -> FitResult:
-        df = panel.df.copy()
-        counts = df.groupby("series_key").size()
+        # A plain `.copy()` here deep-copies every object-dtype column
+        # (series_key, category) element-by-element -- measured at real
+        # fold scale (48.1M rows), that alone was 5.94GB, doubling the
+        # base DataFrame's footprint to ~14.4GB before any feature
+        # engineering (see KNOWN_ISSUES.md's GH Actions feasibility
+        # entry, where this was caught). `copy(deep=False)` + an
+        # immediate category-dtype cast avoids ever materialising that
+        # duplicate: casting to `category` collapses each column to a
+        # small integer-code array plus one copy of the distinct
+        # values, dropping the same DataFrame's measured footprint from
+        # 7.19GB to 1.40GB.
+        df = panel.df.copy(deep=False)
+        df["series_key"] = df["series_key"].astype("category")
+        counts = df.groupby("series_key", observed=True).size()
         too_short = counts[counts < self.min_history_days]
         if len(too_short) > 0:
             raise InsufficientHistoryError(
@@ -232,7 +244,7 @@ class BayesGLMPooled(ForecastModel):
         df["ds"] = pd.to_datetime(df["ds"])
         if "category" not in df.columns:
             df["category"] = DEFAULT_CATEGORY
-        df["category"] = df["category"].fillna(DEFAULT_CATEGORY)
+        df["category"] = df["category"].fillna(DEFAULT_CATEGORY).astype("category")
         for col, default in (("event_flag", 0.0), ("snap_flag", 0.0), ("price", np.nan)):
             if col not in df.columns:
                 df[col] = default
@@ -240,7 +252,7 @@ class BayesGLMPooled(ForecastModel):
         # Active-span offset per series (E3): log(mean sales over active span).
         offsets: dict = {}
         categories: dict = {}
-        for series_key, group in df.groupby("series_key"):
+        for series_key, group in df.groupby("series_key", observed=True):
             y = group.sort_values("ds")["y"].to_numpy(dtype=float)
             offsets[series_key] = _active_span_offset(y)
             categories[series_key] = group["category"].iloc[0]
@@ -378,7 +390,11 @@ class BayesGLMPooled(ForecastModel):
         capped = original_rows > max_rows
         if capped:
             rng = np.random.default_rng(seed)
-            series_keys = subset["series_key"].unique()
+            # series_key is categorical dtype (see fit()); .unique() on a
+            # categorical column returns a Categorical, and shuffling that
+            # directly isn't guaranteed correct (pandas warns: not a
+            # Sequence subclass) -- convert to a plain numpy array first.
+            series_keys = np.asarray(subset["series_key"].unique())
             rng.shuffle(series_keys)
             rows_per_series = original_rows / len(series_keys)
             n_series_to_keep = max(1, int(max_rows / rows_per_series))

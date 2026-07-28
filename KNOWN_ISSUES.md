@@ -2,6 +2,35 @@
 
 Tracked but not yet fixed. Add new entries at the top.
 
+## FIXED: the memory estimator's own 3.90GB figure never accounted for the base DataFrame (2026-07-28)
+
+Discovered while measuring real numbers for the GitHub Actions
+feasibility check below, not from a failure -- worth catching before
+it became one. `_check_fit_memory`/`_estimate_fit_memory_bytes` only
+ever estimated the arrays `fit()` builds for PyMC (continuous design
+matrix, index arrays); it never accounted for the input pandas
+DataFrame itself. Measuring fold 1's actual cached train frame
+(`data/fold_cache/comparator/fold1_train.parquet`, 48.1M rows) with
+`df.memory_usage(deep=True)` gave **7.19GB** for the base 7-column
+frame alone -- `series_key` and `category` as object-dtype string
+columns accounted for 5.94GB of that (pandas stores each string as a
+separate Python object). `fit()`'s first line, `df = panel.df.copy()`,
+would have deep-copied those columns again, doubling it to ~14.4GB
+before any feature engineering. On a 16GB VM (`PROVISIONING.md`) that
+would have been a genuinely close call, not the comfortable margin the
+3.90GB PyMC-array estimate implied.
+
+Fixed at the root, not by inflating the estimate: `fit()` now does
+`df = panel.df.copy(deep=False)` and immediately casts `series_key` and
+`category` to pandas `category` dtype (each column collapses to a
+small integer-code array plus one copy of the distinct values).
+Measured effect: base DataFrame footprint 7.19GB -> **1.40GB**; RSS
+during the copy+cast didn't move at all (confirmed via `resource.
+getrusage`). `_run_nuts_spot_check`'s series-key subsampling also had
+to change (`rng.shuffle` on a `Categorical` isn't guaranteed correct --
+pandas warns "not a subclass of Sequence"; fixed by converting to a
+plain numpy array first). All 147 tests still pass.
+
 ## RULED OUT (verified, not assumed): GitHub Actions private-repo runners cannot run the comparator batch (2026-07-28)
 
 Considered as an alternative to a manually-provisioned VM (`PROVISIONING.md`)
