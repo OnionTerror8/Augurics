@@ -60,12 +60,21 @@ for name in ("calendar.csv", "sell_prices.csv", "sales_train_evaluation.csv"):
 
 result = os.system("python -m engine.data.ingest")
 assert result == 0, "ingest failed -- row-count reconciliation raised, see output above"
-```
 
-`engine.data.ingest.ingest()` already asserts row-count reconciliation
-against the source CSVs (30,490 series x 1,941 days = 59,181,090 rows)
--- this is the SAME fail-loud check used locally, not a Kaggle-specific
-addition.
+# Belt-and-suspenders: engine.data.ingest.ingest() already asserts this
+# internally (fails loud, raises ReconciliationError on any mismatch,
+# same check used locally) -- re-asserted explicitly here too, against
+# the exact committed figures, so a silent pass on Kaggle's copy of the
+# data is never possible even if ingest.py's own check were bypassed.
+import duckdb
+
+con = duckdb.connect("data/m5/augurics.duckdb", read_only=True)
+row_count = con.execute("SELECT COUNT(*) FROM panel").fetchone()[0]
+con.close()
+EXPECTED_ROWS = 30_490 * 1_941  # 59,181,090 -- committed figure, reviewed in this project's earlier sessions
+assert row_count == EXPECTED_ROWS, f"Kaggle's ingested panel has {row_count:,} rows, expected {EXPECTED_ROWS:,} -- STOP, do not proceed"
+print(f"Row-count reconciliation OK: {row_count:,} rows")
+```
 
 ## Cell 3 — verify the environment
 
@@ -79,7 +88,7 @@ run -- if something about the Kaggle environment differs (a wheel that
 built differently, a library version mismatch), this is where it
 surfaces, not mid-fold.
 
-## Cell 4 — comparator: fold 1 (bounded NUTS + predictive-agreement gate)
+## Cell 4 — Notebook A only: comparator, fold 1 (bounded NUTS + predictive-agreement gate)
 
 ```python
 result = os.system("python -m engine.backtest.run_comparator_batch")
@@ -95,7 +104,10 @@ as the first ADVI/NUTS predictive comparison on the fixed model,
 superseding the §6 figures for licensing purposes (per the review-two
 instruction already on record).
 
-## Cell 5 — challenger: 4 folds x the pre-registered 12-combo grid
+## Cell 5 — Notebook B only: challenger, 4 folds x the pre-registered 12-combo grid
+
+Do the bounded first-combo check described in "Session-length" below
+BEFORE running this cell for the full grid.
 
 ```python
 result = os.system("python -m engine.backtest.run_challenger_batch")
@@ -109,7 +121,7 @@ directory and schema the Rung 1 baselines already use -- `make gates`
 and `GATE_REPORT.md`'s G1/G2 evaluation pick them up with no special
 casing.
 
-## Cell 6 — package results for retrieval
+## Cell 6 — package results for retrieval (both notebooks)
 
 ```python
 import shutil
@@ -123,9 +135,12 @@ print("Result archive at /kaggle/working/augurics_results.zip")
 ```
 
 Anything under `/kaggle/working/` at the end of a "Save & Run All
-(Commit)" becomes a downloadable output of that notebook version --
-this zip (comparator results, challenger grid + selected results, both
-run_log.txt files) is what comes back.
+(Commit)" becomes a downloadable output of that notebook version.
+Notebook A's zip holds `comparator/results/` (+ its `run_log.txt`);
+Notebook B's holds `challenger_grid/` (the raw per-combo results) and
+`slow_baseline_results/` (the selected best combo's per-fold results,
+`fold{N}_lgbm_promo_v1.parquet`) -- both are the same `data/fold_cache`
+tree, just populated with whichever notebook ran.
 
 ## Retrieval (local)
 
@@ -147,12 +162,45 @@ if it had been produced locally. Quarantine rules unchanged: the
 comparator's numbers are not merged into any gate arithmetic until the
 fold-1 predictive-agreement gate has been reviewed.
 
-## Session-length note
+## Session-length: split into two notebooks, not one
 
-Fold 1's comparator estimate was ~2.6-2.9h pre-refactor; the challenger
-grid is 48 fits (4 folds x 12 combos) at unknown-but-likely-much-faster
-per-fit time than ADVI (LightGBM, not MCMC). Both should clear the
-12-hour session limit individually, but if the notebook is run as ONE
-"Save & Run All" spanning cells 4 AND 5, watch the cumulative wall
-time -- split into two separate commits (comparator first, challenger
-second) if it looks close, rather than risk a mid-run cutoff.
+Stated before launching, per instruction -- and it changes the plan:
+
+**Comparator alone is already close to the 12-hour ceiling.** The
+pre-refactor estimate was ~2.6-2.9h/fold x 4 folds = **10.4-11.6h**,
+plus fold 1's bounded NUTS spot-check and predictive-agreement check
+(~5-15 min more, based on the 332s measured at 182-series/113k-row
+scale, extrapolated to the bounded 100k-row cap). The indexed-
+categorical refactor should not have made ADVI slower (gather ops
+replace dense matmuls), but there is no fresh measurement at real
+fold-1 scale post-refactor -- the estimate carries that uncertainty
+forward. Either way, there is little to no headroom left in the same
+session for the challenger's 48 fits on top.
+
+**Challenger timing is genuinely unverified** -- no real-fold-scale
+LightGBM fit has been timed (only tiny synthetic data locally, which
+says nothing about wall time at 48M rows). Gradient boosting is
+typically much faster than ADVI per fit, but "typically" is not a
+number.
+
+**Recommendation: two separate notebook commits, not one "Save & Run
+All" spanning both.**
+
+1. **Notebook A** -- cells 1-4 (clone, ingest+reconcile, test, comparator
+   4 folds). Commit and let it run; expect close to the full 12h.
+2. **Notebook B** -- cells 1-3 again (fresh session, re-ingest is cheap
+   -- it's a few DuckDB queries over already-attached data, not a
+   multi-hour operation) + cell 5 (challenger grid) + cell 6 (package).
+   **Before committing to the full run**, do a bounded first check:
+   run combo 0/fold 1 alone (`python -m engine.backtest.
+   run_challenger_one_fold --fold-id 1 --combo-index 0 --out /tmp/probe.parquet`)
+   and read its printed wall time. Multiply by 48 for a real estimate
+   of the full grid's wall time before committing to "Save & Run All"
+   on the rest -- the same verify-before-committing discipline as
+   everything else in this project, not a guess.
+
+If Notebook B's extrapolated total exceeds ~10h, split the grid itself
+at fold boundaries (e.g. folds 1-2 in one commit, folds 3-4 in
+another) -- `run_challenger_batch.py`'s per-(fold,combo) resumability
+means a partial run is never wasted; a subsequent commit just skips
+what already has a result file.
