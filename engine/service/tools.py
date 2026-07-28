@@ -23,6 +23,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import asdict
 from datetime import date, datetime, timezone
+from pathlib import Path
 
 import duckdb
 import numpy as np
@@ -247,16 +248,36 @@ def run_scenario(scope: dict, drivers: list[dict], base_model_version: str | Non
     }
 
 
-def compare_models(scope: dict | None, model_version_ids: list[str] | str = "all_candidates", protocol_id: str | None = None) -> dict:
+def compare_models(
+    scope: dict | None,
+    model_version_ids: list[str] | str = "all_candidates",
+    protocol_id: str | None = None,
+    results_dirs: list[Path] | None = None,
+) -> dict:
     """in: scope, model_version_ids | "all_candidates", protocol_id?
     out: side-by-side backtest metrics, gate outcomes, per-segment
     winners. Reads the SAME validated result parquets GATE_REPORT.md is
     built from (engine.backtest.gate_report.collect_results) -- never a
-    number computed ad hoc outside that harness."""
-    fold_results = collect_results([BASELINE_RESULTS_DIR])
+    number computed ad hoc outside that harness. `results_dirs` defaults
+    to BASELINE_RESULTS_DIR but is injectable so callers (and tests) are
+    not coupled to whatever happens to be on disk.
+
+    Contract decision (02_AGENT_TOOL_CONTRACTS.md design principle 1,
+    "the agent narrates facts, it does not invent them", and principle
+    4, "fail loud, explain gently"): "all_candidates" with zero results
+    available raises ValueError, the same as asking for an explicit
+    model_version_ids that doesn't exist. A well-formed comparison
+    object with overall_winner=None and empty metrics would let an
+    agent state "no candidates to compare" as if that were a real,
+    checked finding, rather than the tool having nothing to read --
+    exactly the silent-stub pattern this project's non-negotiable rules
+    ban elsewhere (fail loud on missing data, never stub)."""
+    fold_results = collect_results(results_dirs if results_dirs is not None else [BASELINE_RESULTS_DIR])
     available_model_ids = sorted({mid for fold in fold_results.values() for mid in fold})
 
     if model_version_ids == "all_candidates":
+        if not available_model_ids:
+            raise ValueError("compare_models: model_version_ids='all_candidates' but no validated results exist in results_dirs -- nothing to compare")
         selected = available_model_ids
     else:
         selected = list(model_version_ids)

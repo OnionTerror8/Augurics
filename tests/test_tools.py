@@ -127,10 +127,33 @@ class TestRunScenario:
             tools.run_scenario(SCOPE, [])
 
 
-@pytest.mark.skipif(not DB_PATH.exists(), reason="requires the real M5 DuckDB")
+def _write_result(results_dir, fold_id, model_id, wmape):
+    results_dir.mkdir(parents=True, exist_ok=True)
+    import pandas as pd
+
+    pd.DataFrame([{
+        "fold_id": fold_id, "model_id": model_id, "wall_seconds": 1.0,
+        "wmape": wmape, "n_series": 100, "n_rows": 2800,
+    }]).to_parquet(results_dir / f"fold{fold_id}_{model_id}.parquet")
+
+
 class TestCompareModels:
-    def test_all_candidates_schema_and_round_trip(self):
-        result = tools.compare_models(scope=None, model_version_ids="all_candidates")
+    """compare_models' real dependency is a results directory with
+    validated result parquets, NOT the M5 DuckDB (it never touches
+    DB_PATH) -- synthetic results injected via results_dirs, so these
+    run identically everywhere (a fresh clone included), no skip."""
+
+    @pytest.fixture
+    def results_dir(self, tmp_path):
+        d = tmp_path / "results"
+        _write_result(d, 1, "naive", 0.98)
+        _write_result(d, 2, "naive", 0.99)
+        _write_result(d, 1, "auto_ets", 0.73)
+        _write_result(d, 2, "auto_ets", 0.72)
+        return d
+
+    def test_all_candidates_schema_and_round_trip(self, results_dir):
+        result = tools.compare_models(scope=None, model_version_ids="all_candidates", results_dirs=[results_dir])
         assert set(result["model_version_ids"]) == set(result["metrics"].keys())
         assert result["overall_winner"] in result["model_version_ids"]
         for model_id, metrics in result["metrics"].items():
@@ -138,14 +161,23 @@ class TestCompareModels:
         _assert_no_nan_anywhere(result)
         _assert_json_round_trips(result)
 
-    def test_explicit_subset(self):
-        result = tools.compare_models(scope=None, model_version_ids=["naive", "auto_ets"])
+    def test_explicit_subset(self, results_dir):
+        result = tools.compare_models(scope=None, model_version_ids=["naive", "auto_ets"], results_dirs=[results_dir])
         assert set(result["model_version_ids"]) == {"naive", "auto_ets"}
-        assert result["overall_winner"] == "auto_ets"  # lowest WMAPE per BASELINE_TABLE.md
+        assert result["overall_winner"] == "auto_ets"  # lower mean WMAPE in the synthetic fixture
 
-    def test_unknown_model_id_raises(self):
+    def test_unknown_model_id_raises(self, results_dir):
         with pytest.raises(ValueError, match="no real results"):
-            tools.compare_models(scope=None, model_version_ids=["lgbm_promo_v1"])
+            tools.compare_models(scope=None, model_version_ids=["lgbm_promo_v1"], results_dirs=[results_dir])
+
+    def test_all_candidates_with_no_results_anywhere_raises(self, tmp_path):
+        """Contract decision: an empty results directory must fail
+        loud, never return a well-formed comparison with
+        overall_winner=None -- that would be the exact silent-stub
+        pattern this project bans elsewhere."""
+        empty_dir = tmp_path / "empty_results"
+        with pytest.raises(ValueError, match="nothing to compare"):
+            tools.compare_models(scope=None, model_version_ids="all_candidates", results_dirs=[empty_dir])
 
 
 class TestGetRunStatus:
