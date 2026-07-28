@@ -104,3 +104,62 @@ def test_render_gate_report_includes_category_breakdown_when_present():
     assert "FOODS" in report
     assert "HOBBIES" in report
     assert "0.8500" in report
+
+
+# --- gates evaluation (task 2.4: real G1/G2/G3, or honest PENDING) ---
+
+
+def _fold_record(model_id: str, wmape: float) -> dict:
+    return {"model_id": model_id, "wmape": wmape}
+
+
+def test_gates_section_pending_when_no_challenger_or_comparator_exist():
+    from engine.backtest.gate_report import render_gates_section
+
+    fold_results = {
+        1: {"seasonal_naive": _fold_record("seasonal_naive", 0.86), "auto_ets": _fold_record("auto_ets", 0.73)},
+        2: {"seasonal_naive": _fold_record("seasonal_naive", 0.87), "auto_ets": _fold_record("auto_ets", 0.73)},
+        3: {"seasonal_naive": _fold_record("seasonal_naive", 0.88), "auto_ets": _fold_record("auto_ets", 0.74)},
+        4: {"seasonal_naive": _fold_record("seasonal_naive", 0.85), "auto_ets": _fold_record("auto_ets", 0.71)},
+    }
+    lines = render_gates_section(fold_results)
+    text = "\n".join(lines)
+    assert "**G1**" in text and "PENDING" in text
+    assert "**G2**" in text
+    assert "**G3**" in text
+    assert "PASS" not in text and "FAIL" not in text
+
+
+def test_gates_section_evaluates_g1_g2_for_real_when_challenger_present():
+    from engine.backtest.gate_report import render_gates_section
+
+    fold_results = {
+        fid: {
+            "seasonal_naive": _fold_record("seasonal_naive", 0.86),
+            "auto_ets": _fold_record("auto_ets", 0.73),
+            "lgbm_promo_v1": _fold_record("lgbm_promo_v1", 0.60),  # clears both 15% and 8% improvement
+        }
+        for fid in (1, 2, 3, 4)
+    }
+    lines = render_gates_section(fold_results)
+    text = "\n".join(lines)
+    assert "**G1**: **PASS**" in text or "**G1**" in text and "PASS" in text
+    assert "PENDING" in text  # G3 still pending: no comparator result
+
+
+def test_gates_section_evaluates_g3_for_real_when_comparator_and_challenger_present():
+    from engine.backtest.gate_report import render_gates_section
+
+    fold_results = {
+        fid: {
+            "seasonal_naive": _fold_record("seasonal_naive", 0.86),
+            "auto_ets": _fold_record("auto_ets", 0.73),
+            "lgbm_promo_v1": _fold_record("lgbm_promo_v1", 0.60),
+            "bayes_glm_pooled": _fold_record("bayes_glm_pooled", 0.70),  # challenger wins every fold
+        }
+        for fid in (1, 2, 3, 4)
+    }
+    lines = render_gates_section(fold_results)
+    text = "\n".join(lines)
+    assert "PENDING" not in text
+    assert "G3" in text and "PASS" in text

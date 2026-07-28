@@ -2,6 +2,40 @@
 
 Tracked but not yet fixed. Add new entries at the top.
 
+## DEFERRED (verified infeasible on this laptop): challenger (Rung 2 lgbm) training, task 2.3 (2026-07-28)
+
+Checked feasibility BEFORE training anything, per the same discipline
+as the comparator (see the memory entries below). Built the real
+feature matrix (`engine.features.library.build_feature_set`) on fold
+1's actual 48,110,016-row train frame, applying the same fixes that
+worked for the comparator (category dtype for `series_key`/`category`,
+int8 for flag columns, float32 for engineered numerics, drop the raw
+`event_name_1`/`event_name_2` string columns once `event_flag` is
+derived from them). Measured via `df.memory_usage(deep=True)`:
+**3.03GB** for the fully-optimized feature matrix (versus 9.58GB
+unoptimized) -- 63.06 bytes/row, now the calibration constant in
+`engine.models.ml.OPTIMIZED_FEATURE_BYTES_PER_ROW`.
+
+Adding LightGBM's own gradient/hessian buffers and a conservative 1.5x
+multiplier for mlforecast's internal preprocessing copy gives an
+estimated **5.13GB** peak for a single fit at fold-1 scale
+(`engine.models.ml.check_challenger_fit_memory`). This laptop's
+available RAM has ranged 1.7-7.4GB over the course of tonight's work
+(mostly clustering 2-5GB under normal desktop load) -- unlike the
+comparator's post-fix 3.90GB estimate, which was a close call against
+this range, the challenger's 5.13GB does not reliably clear even the
+best observed windows at the guard's 50%-of-available budget. Checked
+live: FAILS at 4.17GB available (budget 2.08GB).
+
+Not a case for relaxing `MAX_CHALLENGER_FIT_MEMORY_FRACTION` -- per
+instruction, the guard stands. Challenger training (task 2.3) is
+deferred alongside the comparator batch (G3), pending the same VM
+(`PROVISIONING.md`). `GATE_REPORT.md` marks G1 and G2 PENDING for this
+reason, not evaluated as a false pass/fail. `tests/test_ml.py` covers
+the guard itself, which is real, tested, and ready to run the moment
+compute is available -- nothing here blocks re-attempting training as
+soon as the VM (or more free RAM on this laptop) exists.
+
 ## FIXED: the memory estimator's own 3.90GB figure never accounted for the base DataFrame (2026-07-28)
 
 Discovered while measuring real numbers for the GitHub Actions

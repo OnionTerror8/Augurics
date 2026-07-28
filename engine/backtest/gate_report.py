@@ -1,11 +1,13 @@
-"""GATE_REPORT.md assembly — per-fold, per-category, and volume-weighted
-tables, over validated result parquets. Task 2.4 groundwork, built ahead
-of the baseline batch finishing so it's ready the moment it does.
+"""GATE_REPORT.md assembly — per-fold, per-category, volume-weighted
+tables, AND the real G1/G2/G3 gate evaluation, over validated result
+parquets. Task 2.4.
 
-No gates (G1/G2/G3) are evaluated by this module -- that needs a Rung 2
-challenger (task 2.3) and the Bayesian comparator's real backtest (task
-2.1, deferred until cores are free). This assembles the per-model metric
-tables the eventual gate evaluation will read.
+G1/G2 need a Rung 2 challenger (task 2.3); G3 needs the Bayesian
+comparator's full backtest (task 2.1). As of this module's task 2.4
+run, neither exists (both deferred by real, verified memory
+infeasibility -- see KNOWN_ISSUES.md), so all three render as PENDING
+with the concrete reason, never as a false pass/fail. The evaluation
+logic itself is real and runs the moment either result exists.
 """
 from __future__ import annotations
 
@@ -13,6 +15,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from engine.backtest.gates import evaluate_fold_consistent_sign_gate, evaluate_wmape_improvement_gate
 from engine.backtest.population import MIN_ACTIVE_SPAN_DAYS, apply_active_span_filter, compute_active_span
 from engine.backtest.protocol import Fold
 from engine.backtest.run_baselines import ResultSchemaError, load_and_validate_result
@@ -20,6 +23,86 @@ from engine.data.ingest import DB_PATH
 
 REPORTS_DIR = Path(__file__).resolve().parents[2] / "reports"
 GATE_REPORT_MD = REPORTS_DIR / "GATE_REPORT.md"
+
+# Protocol P1 (immutable): G1 vs Seasonal Naive (>=15% improvement), G2
+# vs AutoETS (>=8%), G3 vs the Bayesian comparator (>0% improvement,
+# fold-consistent sign, wins >= 3/4 folds). Mirrors baseline_table.py's
+# constants -- restated here rather than imported, since gate_report.py
+# is the module that actually evaluates them and must not depend on the
+# BASELINE_TABLE.md-specific assembly module for its own gate logic.
+CHALLENGER_MODEL_ID = "lgbm_promo_v1"
+COMPARATOR_MODEL_ID = "bayes_glm_pooled"
+G1_COMPARATOR_MODEL_ID = "seasonal_naive"
+G1_MIN_IMPROVEMENT = 0.15
+G2_COMPARATOR_MODEL_ID = "auto_ets"
+G2_MIN_IMPROVEMENT = 0.08
+G3_MIN_WINS = 3
+
+CHALLENGER_DEFERRED_REASON = (
+    "no Rung 2 challenger result yet -- task 2.3 training deferred by a "
+    "verified memory-infeasibility check (KNOWN_ISSUES.md: fold-1 scale "
+    "estimate 5.13GB vs this laptop's available RAM), awaiting the VM in "
+    "PROVISIONING.md. Not a false pass/fail; the evaluation below runs "
+    "the moment `lgbm_promo_v1` results exist for all four folds."
+)
+COMPARATOR_DEFERRED_REASON = (
+    "the Bayesian comparator's real 4-fold backtest awaits compute (VM "
+    "unavailable, see PROVISIONING.md) and is quarantined regardless: "
+    "results are written but not merged into any gate arithmetic until "
+    "the fold-1 bounded NUTS + predictive-agreement gate reports and is "
+    "reviewed (comparator_evidence.md §7)."
+)
+
+
+def _fold_metric_series(fold_results: dict[int, dict[str, dict]], model_id: str, fold_ids: list[int]) -> list[float] | None:
+    """WMAPEs for `model_id` across `fold_ids`, in fold order, or None if
+    any fold is missing that model's result -- a partial set is not
+    enough to evaluate a gate that must cover the same four folds."""
+    values = []
+    for fid in fold_ids:
+        record = fold_results.get(fid, {}).get(model_id)
+        if record is None:
+            return None
+        values.append(record["wmape"])
+    return values
+
+
+def render_gates_section(fold_results: dict[int, dict[str, dict]]) -> list[str]:
+    fold_ids = sorted(fold_results.keys())
+    lines = ["## Gates (Protocol P1, immutable thresholds)", ""]
+
+    challenger = _fold_metric_series(fold_results, CHALLENGER_MODEL_ID, fold_ids)
+    g1_comparator = _fold_metric_series(fold_results, G1_COMPARATOR_MODEL_ID, fold_ids)
+    g2_comparator = _fold_metric_series(fold_results, G2_COMPARATOR_MODEL_ID, fold_ids)
+    bayes_comparator = _fold_metric_series(fold_results, COMPARATOR_MODEL_ID, fold_ids)
+
+    if challenger is None or g1_comparator is None:
+        lines.append(f"- **G1** (vs Seasonal Naive, >= {G1_MIN_IMPROVEMENT:.0%} improvement): "
+                      f"**PENDING** -- {CHALLENGER_DEFERRED_REASON}")
+    else:
+        g1 = evaluate_wmape_improvement_gate("G1", challenger, g1_comparator, G1_MIN_IMPROVEMENT)
+        lines.append(f"- **G1** (vs Seasonal Naive, >= {G1_MIN_IMPROVEMENT:.0%} improvement): "
+                      f"**{'PASS' if g1.passed else 'FAIL'}** -- {g1.detail}")
+
+    if challenger is None or g2_comparator is None:
+        lines.append(f"- **G2** (vs AutoETS, >= {G2_MIN_IMPROVEMENT:.0%} improvement): "
+                      f"**PENDING** -- {CHALLENGER_DEFERRED_REASON}")
+    else:
+        g2 = evaluate_wmape_improvement_gate("G2", challenger, g2_comparator, G2_MIN_IMPROVEMENT)
+        lines.append(f"- **G2** (vs AutoETS, >= {G2_MIN_IMPROVEMENT:.0%} improvement): "
+                      f"**{'PASS' if g2.passed else 'FAIL'}** -- {g2.detail}")
+
+    if challenger is None or bayes_comparator is None:
+        reason = CHALLENGER_DEFERRED_REASON if challenger is None else COMPARATOR_DEFERRED_REASON
+        lines.append(f"- **G3** (vs Bayesian comparator, >0% improvement, wins >= {G3_MIN_WINS}/{len(fold_ids) or 4} folds): "
+                      f"**PENDING** -- {reason}")
+    else:
+        g3 = evaluate_fold_consistent_sign_gate("G3", challenger, bayes_comparator, G3_MIN_WINS)
+        lines.append(f"- **G3** (vs Bayesian comparator, >0% improvement, wins >= {G3_MIN_WINS}/{len(fold_ids)} folds): "
+                      f"**{'PASS' if g3.passed else 'FAIL'}** -- {g3.detail}")
+
+    lines.append("")
+    return lines
 
 
 def collect_results(results_dirs: list[Path]) -> dict[int, dict[str, dict]]:
@@ -75,19 +158,16 @@ def render_gate_report(
     model_ids = sorted({model_id for fold in fold_results.values() for model_id in fold})
 
     lines = [
-        "# GATE_REPORT — Rung 1 baselines (Protocol P1)",
+        "# GATE_REPORT (Protocol P1)",
         "",
-        "No gates (G1/G2/G3) are evaluated here -- G1/G2 need a Rung 2 "
-        "challenger (task 2.3), G3 needs the Bayesian comparator's full "
-        "backtest (task 2.1, deferred until the baseline batch's cores "
-        "are free). This is the per-model metric table the eventual gate "
-        "evaluation will read.",
-        "",
+    ]
+    lines.extend(render_gates_section(fold_results))
+    lines.extend([
         "## Per-fold, volume-weighted WMAPE",
         "",
         "| Model | " + " | ".join(f"Fold {fid}" for fid in fold_ids) + " | Mean |",
         "|---|" + "---|" * (len(fold_ids) + 1),
-    ]
+    ])
     for model_id in model_ids:
         per_fold = [fold_results[fid][model_id]["wmape"] for fid in fold_ids if model_id in fold_results[fid]]
         mean_wmape = sum(per_fold) / len(per_fold) if per_fold else float("nan")
