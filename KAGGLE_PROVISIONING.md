@@ -123,24 +123,46 @@ casing.
 
 ## Cell 6 — package results for retrieval (both notebooks)
 
+Archives ONLY the small result/log directories, never the raw
+fold-cache train/holdout parquets (comparator/fold1_train.parquet
+alone is hundreds of MB at real scale) -- those exist identically on
+both ends already (same M5 DB, same extraction logic), so shipping
+them over the network would be pure waste.
+
 ```python
 import shutil
+from pathlib import Path
 
-shutil.make_archive(
-    "/kaggle/working/augurics_results",
-    "zip",
-    root_dir="/kaggle/working/augurics-engine/data/fold_cache",
-)
+staging = Path("/kaggle/working/results_staging")
+staging.mkdir(exist_ok=True)
+
+fold_cache = Path("/kaggle/working/augurics-engine/data/fold_cache")
+# present only on Notebook A (comparator) or Notebook B (challenger) --
+# copy whichever subset exists here, skip what doesn't.
+for rel_path in ("comparator/results", "challenger_grid"):
+    src = fold_cache / rel_path
+    if src.exists():
+        shutil.copytree(src, staging / rel_path)
+
+slow_baseline_src = fold_cache / "slow_baseline_results"
+if slow_baseline_src.exists():
+    dest = staging / "slow_baseline_results"
+    dest.mkdir(parents=True, exist_ok=True)
+    for f in slow_baseline_src.glob("*lgbm_promo_v1*"):
+        shutil.copy(f, dest / f.name)
+
+shutil.make_archive("/kaggle/working/augurics_results", "zip", root_dir=staging)
 print("Result archive at /kaggle/working/augurics_results.zip")
 ```
 
 Anything under `/kaggle/working/` at the end of a "Save & Run All
 (Commit)" becomes a downloadable output of that notebook version.
 Notebook A's zip holds `comparator/results/` (+ its `run_log.txt`);
-Notebook B's holds `challenger_grid/` (the raw per-combo results) and
-`slow_baseline_results/` (the selected best combo's per-fold results,
-`fold{N}_lgbm_promo_v1.parquet`) -- both are the same `data/fold_cache`
-tree, just populated with whichever notebook ran.
+Notebook B's holds `challenger_grid/` (the raw per-combo results, its
+`run_log.txt`) and `slow_baseline_results/` (only the selected best
+combo's `fold{N}_lgbm_promo_v1.parquet` files, not the whole directory
+-- Notebook B never touches the Rung 1 baseline results already
+committed locally).
 
 ## Retrieval (local)
 
