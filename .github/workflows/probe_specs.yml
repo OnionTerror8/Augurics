@@ -18,11 +18,10 @@ jobs:
           echo "=== df -h ==="
           df -h /
           echo "=== python psutil available (fresh, before any pip installs) ==="
-          python3 -c "
-import subprocess
-subprocess.run(['pip', 'install', '-q', 'psutil'])
-import psutil
-print('available bytes:', psutil.virtual_memory().available)
-print('available GB:', psutil.virtual_memory().available / 1e9)
-print('total GB:', psutil.virtual_memory().total / 1e9)
-"
+          pip install -q psutil
+          python3 - <<'PYEOF'
+          import psutil
+          print("available bytes:", psutil.virtual_memory().available)
+          print("available GB:", psutil.virtual_memory().available / 1e9)
+          print("total GB:", psutil.virtual_memory().total / 1e9)
+          PYEOF
