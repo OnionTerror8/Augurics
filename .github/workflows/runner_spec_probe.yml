@@ -1,0 +1,25 @@
+name: runner-spec-probe
+on: workflow_dispatch
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report hardware
+        run: |
+          echo "=== nproc ==="
+          nproc
+          echo "=== free -h ==="
+          free -h
+          echo "=== /proc/meminfo (MemAvailable) ==="
+          grep MemAvailable /proc/meminfo
+          echo "=== df -h ==="
+          df -h /
+          echo "=== python psutil available (fresh, before any pip installs) ==="
+          python3 -c "
+import subprocess
+subprocess.run(['pip', 'install', '-q', 'psutil'])
+import psutil
+print('available bytes:', psutil.virtual_memory().available)
+print('available GB:', psutil.virtual_memory().available / 1e9)
+print('total GB:', psutil.virtual_memory().total / 1e9)
+"
