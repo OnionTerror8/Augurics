@@ -27,6 +27,24 @@ disappoints in practice; this is the current preferred path.
    "Add Data", search and attach the **m5-forecasting-accuracy**
    competition dataset.
 
+**Before every "Save & Run All", re-verify the `GITHUB_TOKEN` secret is
+attached to THAT notebook** (Add-ons -> Secrets -> toggle ON for this
+notebook), not just that it exists somewhere in your account. Secret
+attachment can lapse between notebook versions -- pushing a new
+version does not guarantee a previously-attached secret stays
+attached -- and our token is a 7-day fine-grained GitHub PAT, so it
+also expires outright on its own schedule and needs regenerating
+periodically. The failure mode either way is the same: Cell 1's
+`git clone` (via `UserSecretsClient().get_secret("GITHUB_TOKEN")`)
+raises an immediate `ConnectionError` (or an auth failure from git)
+within seconds of the run starting -- fast, not subtle, but easy to
+mistake for something else if you're only watching for the batch
+cells' output hours later. This is the most plausible explanation for
+Notebook B's earlier unexplained early stop (see `KNOWN_ISSUES.md`):
+a silent, fast Cell 1 failure looks identical from the outside to "the
+run stopped early with no error in the log I was checking" if you
+weren't watching the very start of that particular run.
+
 Everything below is cell content to paste into that notebook, in order.
 
 ## Cell 1 — clone at HEAD, install
