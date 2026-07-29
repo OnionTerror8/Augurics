@@ -1,4 +1,4 @@
-.PHONY: ingest diagnose gates test push-data pull-results validate-kaggle morning-report
+.PHONY: ingest diagnose gates test push-data pull-results validate-kaggle morning-report pull-kaggle
 
 test:
 	pytest
@@ -37,3 +37,15 @@ validate-kaggle:
 # merges results or evaluates a gate.
 morning-report:
 	python -m engine.backtest.kaggle_morning_report
+
+# One-command Kaggle retrieval (task 2.1/2.3) -- see KAGGLE_PROVISIONING.md.
+# NOTEBOOK_A/NOTEBOOK_B default to this project's two batch notebooks
+# (identified via `kaggle kernels list --mine`); override on the
+# command line if the slugs ever change, e.g.
+#   make pull-kaggle NOTEBOOK_A=onionterror8/some-other-slug
+NOTEBOOK_A ?= onionterror8/notebook-a
+NOTEBOOK_B ?= onionterror8/notebook-b
+
+pull-kaggle:
+	python -m engine.backtest.pull_kaggle_cli --notebook-a $(NOTEBOOK_A) --notebook-b $(NOTEBOOK_B)
+	$(MAKE) validate-kaggle COMPARATOR_ZIP=/tmp/kaggle_a/augurics_results.zip CHALLENGER_ZIP=/tmp/kaggle_b/augurics_results.zip

@@ -164,25 +164,47 @@ combo's `fold{N}_lgbm_promo_v1.parquet` files, not the whole directory
 -- Notebook B never touches the Rung 1 baseline results already
 committed locally).
 
-## Retrieval (local)
+## Retrieval (local) — CLI route (primary)
 
-Download the notebook's output zip from Kaggle's UI (Output tab of the
-committed version), then:
+One command, no manual download:
 
 ```bash
 cd ~/augurics-engine
-unzip ~/Downloads/augurics_results.zip -d /tmp/kaggle_results
-cp -r /tmp/kaggle_results/comparator/results/* data/fold_cache/comparator/results/
-cp -r /tmp/kaggle_results/slow_baseline_results/*lgbm_promo_v1* data/fold_cache/slow_baseline_results/
-cp -r /tmp/kaggle_results/challenger_grid data/fold_cache/
+make pull-kaggle
 ```
 
+This runs `kaggle kernels output` for both notebooks (defaults:
+`onionterror8/notebook-a` for the comparator, `onionterror8/notebook-b`
+for the challenger -- override with `NOTEBOOK_A=`/`NOTEBOOK_B=` if the
+slugs ever change), fails loud with a clear message if the `kaggle` CLI
+isn't installed, if credentials aren't configured, or if either
+notebook's pulled output is missing `augurics_results.zip` (e.g. the
+notebook hasn't reached Cell 6 yet, or failed earlier) -- then chains
+directly into `make validate-kaggle` against both downloaded zips, so
+the command ends with the validation summary printed.
+
 Every result file that lands here still passes through
-`load_and_validate_result` the moment anything reads it (`GATE_REPORT.md`
-assembly, `compare_models`) -- schema-validated by content, exactly as
-if it had been produced locally. Quarantine rules unchanged: the
-comparator's numbers are not merged into any gate arithmetic until the
-fold-1 predictive-agreement gate has been reviewed.
+`load_and_validate_result` the moment anything reads it -- schema
+validated by content, exactly as if produced locally. Quarantine rules
+unchanged: nothing merges into any gate arithmetic until the fold-1
+predictive-agreement number has been reviewed and quarantine is
+explicitly lifted (`make morning-report`, run separately, after
+`make pull-kaggle` reports clean).
+
+## Retrieval (local) — browser download (fallback)
+
+If the CLI route doesn't work (e.g. no local Kaggle credentials, or
+`kaggle kernels output` behaves unexpectedly), download the notebook's
+output zip from Kaggle's UI (Output tab of the committed version)
+instead, then:
+
+```bash
+cd ~/augurics-engine
+make validate-kaggle COMPARATOR_ZIP=~/Downloads/augurics_results_a.zip CHALLENGER_ZIP=~/Downloads/augurics_results_b.zip
+```
+
+(rename the two downloaded files first if they land with the same
+default name -- Kaggle doesn't namespace them by notebook.)
 
 ## Session-length: split into two notebooks, not one
 
