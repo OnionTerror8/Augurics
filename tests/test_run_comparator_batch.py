@@ -83,3 +83,101 @@ def test_raises_and_logs_on_subprocess_failure(tmp_path, four_folds):
         assert "FAILED" in log_text
         assert "ADVIConvergenceError" in log_text
         assert not (tmp_path / "fold1_bayes_glm_pooled.parquet").exists()
+
+
+# --- --fold-id filtering (task 2.1 relaunch strategy: one fold per Kaggle commit) ---
+
+
+def test_fold_id_restricts_to_exactly_one_fold(tmp_path, four_folds):
+    with patch("engine.backtest.run_comparator_batch.dataset_bounds", return_value=(None, None)), \
+         patch("engine.backtest.run_comparator_batch.make_folds", return_value=four_folds), \
+         patch("engine.backtest.run_comparator_batch.subprocess.run") as mock_run:
+
+        def side_effect(cmd, **kwargs):
+            fold_id = int(cmd[cmd.index("--fold-id") + 1])
+            _write_result(tmp_path / f"fold{fold_id}_bayes_glm_pooled.parquet", fold_id)
+            return MagicMock(returncode=0, stdout="ok", stderr="")
+
+        mock_run.side_effect = side_effect
+        run(results_dir=tmp_path, fold_id=2)
+
+        called_fold_ids = {int(c.args[0][c.args[0].index("--fold-id") + 1]) for c in mock_run.call_args_list}
+        assert called_fold_ids == {2}
+        assert not (tmp_path / "fold1_bayes_glm_pooled.parquet").exists()
+        assert not (tmp_path / "fold3_bayes_glm_pooled.parquet").exists()
+
+
+def test_fold_id_raises_for_unknown_fold(tmp_path, four_folds):
+    with patch("engine.backtest.run_comparator_batch.dataset_bounds", return_value=(None, None)), \
+         patch("engine.backtest.run_comparator_batch.make_folds", return_value=four_folds):
+        with pytest.raises(ValueError, match="no fold with fold_id=99"):
+            run(results_dir=tmp_path, fold_id=99)
+
+
+def test_success_log_line_includes_result_path(tmp_path, four_folds):
+    with patch("engine.backtest.run_comparator_batch.dataset_bounds", return_value=(None, None)), \
+         patch("engine.backtest.run_comparator_batch.make_folds", return_value=four_folds), \
+         patch("engine.backtest.run_comparator_batch.subprocess.run") as mock_run:
+
+        def side_effect(cmd, **kwargs):
+            fold_id = int(cmd[cmd.index("--fold-id") + 1])
+            _write_result(tmp_path / f"fold{fold_id}_bayes_glm_pooled.parquet", fold_id)
+            return MagicMock(returncode=0, stdout="ok", stderr="")
+
+        mock_run.side_effect = side_effect
+        run(results_dir=tmp_path, fold_id=2)
+
+        log_text = (tmp_path / "run_log.txt").read_text()
+        assert str(tmp_path / "fold2_bayes_glm_pooled.parquet") in log_text
+
+
+# --- session-budget guard ---
+
+
+def test_check_session_budget_passes_with_ample_remaining_time():
+    from engine.backtest.run_comparator_batch import check_session_budget
+
+    now = 100_000.0
+    session_started_at = now - 3600  # 1h elapsed
+    remaining = check_session_budget(session_started_at, projected_fit_seconds=3600, now=now)
+    assert remaining == pytest.approx(12 * 3600 - 3600)
+
+
+def test_check_session_budget_raises_with_numbers_when_insufficient():
+    from engine.backtest.run_comparator_batch import SessionBudgetExceededError, check_session_budget
+
+    now = 100_000.0
+    session_started_at = now - 11 * 3600  # 11h already elapsed -- only 1h left, minus 30min margin
+    with pytest.raises(SessionBudgetExceededError, match="Refusing to start"):
+        check_session_budget(session_started_at, projected_fit_seconds=10.6 * 3600, now=now)
+
+
+def test_run_raises_session_budget_error_before_launching_subprocess_when_insufficient(tmp_path, four_folds):
+    with patch("engine.backtest.run_comparator_batch.dataset_bounds", return_value=(None, None)), \
+         patch("engine.backtest.run_comparator_batch.make_folds", return_value=four_folds), \
+         patch("engine.backtest.run_comparator_batch.subprocess.run") as mock_run, \
+         patch("engine.backtest.run_comparator_batch.time.time", return_value=100_000.0):
+        from engine.backtest.run_comparator_batch import SessionBudgetExceededError
+
+        session_started_at = 100_000.0 - 11 * 3600
+        with pytest.raises(SessionBudgetExceededError):
+            run(results_dir=tmp_path, fold_id=2, session_started_at=session_started_at)
+
+        mock_run.assert_not_called()
+
+
+def test_run_skips_session_budget_check_when_not_provided(tmp_path, four_folds):
+    """Default behaviour (no session_started_at) must not enforce the
+    guard at all -- e.g. local runs, the VM route, or tests."""
+    with patch("engine.backtest.run_comparator_batch.dataset_bounds", return_value=(None, None)), \
+         patch("engine.backtest.run_comparator_batch.make_folds", return_value=four_folds), \
+         patch("engine.backtest.run_comparator_batch.subprocess.run") as mock_run:
+
+        def side_effect(cmd, **kwargs):
+            fold_id = int(cmd[cmd.index("--fold-id") + 1])
+            _write_result(tmp_path / f"fold{fold_id}_bayes_glm_pooled.parquet", fold_id)
+            return MagicMock(returncode=0, stdout="ok", stderr="")
+
+        mock_run.side_effect = side_effect
+        run(results_dir=tmp_path, fold_id=1)  # no session_started_at -- must not raise
+        assert mock_run.called

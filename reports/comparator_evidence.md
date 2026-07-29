@@ -149,3 +149,25 @@ Acceptance criteria (per review instruction): seed-to-seed spread under 5% relat
 Per-seed old-vs-new relative WMAPE differences with the fix applied: 1.88%, 0.80%, 0.49%, 1.32%, 1.64% -- all within each parameterisation's own seed-to-seed noise band (1.14-1.46%). The two parameterisations are now indistinguishable within noise, which retroactively confirms **the OOM refactor itself was never the source of the original 131% divergence** -- the divergence was entirely attributable to trend leverage under reparameterisation-sensitive ADVI, now fixed at the feature/prior level rather than the parameterisation level.
 
 **Conclusion:** the indexed-categorical refactor (§7.1) is validated as equivalent to the original dense-dummy parameterisation once the pre-existing trend instability (§7.2, discovered incidentally during this equivalence check, not caused by the refactor) is fixed. The refactor is licensed for the real 4-fold batch relaunch on this basis.
+
+## 8. Full-scale confirmation (real fold 1, Kaggle) supersedes §6's sample figures
+
+The 182-series sample's ADVI-vs-NUTS comparison (§6: mean_abs_coef_diff of 0.171, no predictive-agreement check existed yet at that point) is now superseded for licensing purposes by a REAL fold-1 run at full population scale (26,304 series, 736,512 holdout rows), executed on Kaggle Notebooks (`onionterror8/notebook-a`) per `KAGGLE_PROVISIONING.md`, using the fixed model (indexed categoricals, float32, int8, rescaled/tightened trend prior -- §7).
+
+**Predictive-agreement result (the decisive check, per the review-two instruction: the gate compares predictions, not posteriors):**
+
+| | WMAPE |
+|---|---|
+| ADVI | 0.7408 |
+| NUTS | 0.7385 |
+| **Relative difference** | **0.31%** |
+
+Tolerance: 2% relative. **Result: PASS.**
+
+**Ruling: ADVI is licensed for gate purposes.** Fold 1's ADVI-fit result (volume-weighted WMAPE 0.8399 against the full holdout population, `data/fold_cache/comparator/results/fold1_bayes_glm_pooled.parquet`) is accepted as the real, gate-relevant fold-1 figure -- not a diagnostic, not provisional. The bounded NUTS spot-check itself (FOODS category, 98,766/22,432,685 rows, capped) reported `mean_abs_coef_diff_advi_vs_nuts = 0.056` -- smaller than §6's sample-scale figure (0.171), consistent with ADVI's approximation improving at larger real-data scale, though this coefficient-level number remains context only, never itself the licensing signal.
+
+**Timing, for the record:** fold 1's real wall time was 38,308.3s (10.64h) -- `fit_seconds` 32,967.6s (9.16h, includes the bounded NUTS spot-check), `predict_seconds` 5,237.5s (1.45h, full-population `_predict_all`). This is ~3.5-4x the pre-refactor local extrapolation (~2.6-2.9h/fold), attributable to Kaggle's CPU-only runtime (2 vCPU) being markedly slower for this workload than assumed. See `KNOWN_ISSUES.md` for the relaunch-strategy consequences of this real timing.
+
+Folds 2-4 remain outstanding (quarantined, not yet run) -- this section licenses ADVI as a *method* for this model at this scale; the volume-weighted comparator figure across all four folds is not yet complete and must not be read from fold 1 alone.
+
+**Scoring scope note, to prevent misreading:** the ADVI/NUTS WMAPE pair above (0.7408 / 0.7385) is computed on the bounded evaluation subset on which both fits produce predictions (the NUTS spot-check population), per the review-two unquarantine conditions -- its sole purpose is the relative agreement between methods. The full-population ADVI figure, 0.8399 volume-weighted WMAPE over all 26,304 series / 736,512 holdout rows, is the only fold-1 number with gate relevance. These two figures measure different populations and must never be compared to each other or quoted interchangeably.

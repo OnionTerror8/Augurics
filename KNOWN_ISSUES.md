@@ -2,6 +2,60 @@
 
 Tracked but not yet fixed. Add new entries at the top.
 
+## RESOLVED: first real Kaggle launch — fold 1 banked, fold 2 ceiling-cancelled, relaunch tooling added (2026-07-29)
+
+The first real launch of both notebooks (task 2.1/2.3) surfaced three
+real findings, all now addressed:
+
+**1. Fold 1's real wall time was 10.64h, not the ~2.6-2.9h estimate.**
+See `comparator_evidence.md` §8 for the full breakdown. This left
+essentially zero session headroom for a second fold -- confirmed
+directly: the batch loop moved on to fold 2 after fold 1 finished,
+fold 2's subprocess started (its fold frames got cached, a fast
+DuckDB step), and was then ceiling-cancelled mid-ADVI-fit with ZERO
+partial credit (atomic writes mean an in-progress fit banks nothing).
+Fixed: `run_comparator_batch` now takes `--fold-id` to restrict one
+invocation to exactly one fold, and `check_session_budget` (same
+module) refuses loud, before starting a fit, if the projected time
+(conservatively, fold 1's full 10.6h applied to every fold) would not
+fit the session's remaining budget minus a 30-minute margin. Relaunch
+strategy: one notebook commit per remaining fold (2, 3, 4), confirming
+each fold's result exists before the next.
+
+**2. Notebook B stopped ~11 minutes in, before Cell 5, with no error.**
+Investigated directly (pulled the committed .ipynb via `kaggle kernels
+pull`) rather than assumed: the notebook is NOT missing or malformed --
+it has a complete, correct 6-cell structure, including a probe-first
+cell (single fold/combo, `x48` extrapolation, `assert est_hours <= 10`)
+already in place before the full-grid cell. The early stop's exact
+cause (external cancel -- manual or platform) remains unexplained; it
+was not a code/editing defect like the earlier YAML de-indent bug.
+Challenger timing at real scale is therefore still completely
+unverified -- the probe-first structure already in the notebook is
+the correct next step, mandatory before any full-grid commit.
+
+**3. Cell 6 (packaging) cannot be relied on to run after a hard
+ceiling-kill.** When Kaggle's session ceiling hits, the entire kernel
+process is terminated, not gracefully stopped -- no in-notebook code
+can guarantee a cleanup/packaging cell executes afterward. This is
+exactly why fold 1's real result reached retrieval at all despite
+Cell 6 never running that session: `kaggle kernels output` captures
+everything under `/kaggle/working/` regardless of whether Cell 6 ran.
+Fixed at the retrieval layer instead of chasing an unfixable
+in-notebook guarantee: `check_kernel_output_has_result_archive`
+(`engine/backtest/pull_kaggle.py`) now falls back to building the
+equivalent archive client-side from the raw pulled tree (the exact
+same staging logic Cell 6 runs, just run locally) whenever Cell 6's
+own staged zip is absent. `make pull-kaggle` handles both cases
+transparently.
+
+Fold 1's validated result (WMAPE 0.8399, predictive-agreement PASS at
+0.31% relative difference) is now copied into
+`data/fold_cache/comparator/results/` and licensed for gate purposes
+-- see `comparator_evidence.md` §8. Folds 2-4 and the full challenger
+grid remain outstanding; quarantine holds until all four comparator
+folds and the challenger grid are banked.
+
 ## COMPUTE HOST CHANGE: Kaggle Notebooks verified viable, supersedes the VM plan for now (2026-07-28)
 
 Verified before committing to it, not assumed: Kaggle Notebooks'

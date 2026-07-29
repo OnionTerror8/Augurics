@@ -88,26 +88,83 @@ run -- if something about the Kaggle environment differs (a wheel that
 built differently, a library version mismatch), this is where it
 surfaces, not mid-fold.
 
-## Cell 4 — Notebook A only: comparator, fold 1 (bounded NUTS + predictive-agreement gate)
+## Cell 4 — Notebook A only: comparator, ONE fold per commit
+
+**Real fold-1 timing on Kaggle was 10.64h (comparator_evidence.md §8)
+-- ~3.5-4x the pre-refactor local extrapolation.** This does not
+leave room for more than one fold per 12h session (confirmed directly:
+the first real run's fold 2 started -- its fold frames got cached --
+and was then ceiling-cancelled mid-fit with zero partial credit,
+atomic writes meaning nothing was banked). `run_comparator_batch` now
+takes `--fold-id` to restrict a single invocation to exactly one fold,
+and a session-budget guard that refuses loud, before starting a fit,
+if the projected time would not fit in the session's remaining budget
+minus a 30-minute margin.
 
 ```python
-result = os.system("python -m engine.backtest.run_comparator_batch")
-assert result == 0, "comparator batch failed or a gate did not clear -- see run_log.txt"
+import time
+
+SESSION_STARTED_AT = time.time()  # capture as close to session start as practical --
+                                   # ideally move this line to Cell 1 instead; kept
+                                   # here for a single copy-paste block
+
+FOLD_ID = 2  # bump this each commit: 2, then 3, then 4
+
+result = os.system(
+    f"python -m engine.backtest.run_comparator_batch "
+    f"--fold-id {FOLD_ID} --session-started-at {SESSION_STARTED_AT}"
+)
+assert result == 0, "comparator batch failed, the session-budget guard refused, or a gate did not clear -- see run_log.txt"
 ```
 
-Unchanged from `PROVISIONING.md`: fold 1 runs with the bounded NUTS
-spot-check and the decisive predictive-agreement check (2% relative
-WMAPE tolerance); folds 2-4 are ADVI-only. If fold 1's
-`PredictiveAgreementError` fires, the batch halts before folds 2-4 --
-same quarantine rule as always, log this run in `comparator_evidence.md`
-as the first ADVI/NUTS predictive comparison on the fixed model,
-superseding the §6 figures for licensing purposes (per the review-two
-instruction already on record).
+If accuracy matters more than convenience, capture `SESSION_STARTED_AT
+= time.time()` as literally the first line of Cell 1 instead and reuse
+it here -- the guard's whole point is knowing how much of the 12h
+ceiling Cells 1-3 (clone, ingest, `make test`) have already consumed,
+and those are not free (the first real run spent ~700s on them before
+Cell 4 even started).
+
+Fold 1 (already banked, see comparator_evidence.md §8) ran with the
+bounded NUTS spot-check and the decisive predictive-agreement check
+(2% relative WMAPE tolerance) and PASSED (0.31% relative difference) --
+ADVI is licensed for gate purposes. Folds 2-4 are ADVI-only (no NUTS;
+`NUTS_SPOT_CHECK_FOLD_ID = 1` only). Run folds 2, 3, 4 as **three
+separate notebook commits**, confirming via `make pull-kaggle` (or
+`kaggle kernels status`) that each fold's result file exists before
+starting the next -- never let one commit's Cell 4 attempt more than
+one fold's worth of fitting.
 
 ## Cell 5 — Notebook B only: challenger, 4 folds x the pre-registered 12-combo grid
 
-Do the bounded first-combo check described in "Session-length" below
-BEFORE running this cell for the full grid.
+**Mandatory: the single-combo probe (below) must run and its
+extrapolation must be read BEFORE this cell runs.** Notebook B's
+committed version already has this structure -- a probe cell (single
+fold/combo, extrapolated x48, hard `assert est_hours <= 10`) placed
+immediately before this one. If relaunching, the relaunch commit runs
+ONLY through the probe cell (comment out or remove this cell and Cell
+6 for that commit); only commit again with this cell re-enabled once
+the probe's extrapolation is read and confirmed to fit the session.
+
+```python
+import time
+
+t0 = time.time()
+result = os.system("python -m engine.backtest.run_challenger_one_fold --fold-id 1 --combo-index 0 --out /tmp/probe.parquet")
+wall = time.time() - t0
+assert result == 0, "probe failed -- see output above"
+est_hours = wall * 48 / 3600
+print(f"Probe wall time: {wall:.1f}s -- extrapolated full grid (48 fits): {est_hours:.1f} hours")
+assert est_hours <= 10, f"STOP: extrapolated {est_hours:.1f}h exceeds the 10h safety bound -- do not run the next cell, split the grid by fold instead"
+print("Under the 10h bound -- proceed to the full-grid cell.")
+```
+
+If the extrapolation exceeds 10h, do not run the full-grid cell as a
+single commit -- split by fold instead (12 fits per commit, one commit
+per fold), using the same `--fold-id` pattern as the comparator, via
+`run_challenger_one_fold` directly for each combo in that fold (a
+`--fold-id`-only mode for `run_challenger_batch` itself is a natural
+follow-up if this split becomes the normal path, mirroring the
+comparator's).
 
 ```python
 result = os.system("python -m engine.backtest.run_challenger_batch")
@@ -164,6 +221,19 @@ combo's `fold{N}_lgbm_promo_v1.parquet` files, not the whole directory
 -- Notebook B never touches the Rung 1 baseline results already
 committed locally).
 
+**This cell can never run after a hard ceiling-kill.** Confirmed in
+practice: when Kaggle's session ceiling hits, the ENTIRE kernel
+process is terminated, not gracefully stopped -- no in-notebook code,
+`try`/`finally`, or signal handler can guarantee this cell executes
+after that. `kaggle kernels output` still captures everything under
+`/kaggle/working/` regardless (this is how fold 1's real result
+reached the retrieval step even though Cell 6 never ran that session)
+-- `make pull-kaggle` / `validate_kaggle.py` handle this: if
+`augurics_results.zip` is absent, they build the equivalent archive
+client-side from the raw pulled tree, running this exact same staging
+logic locally instead of on Kaggle. This cell is still worth keeping
+for the normal (non-killed) case -- it just isn't load-bearing.
+
 ## Retrieval (local) — CLI route (primary)
 
 One command, no manual download:
@@ -206,45 +276,36 @@ make validate-kaggle COMPARATOR_ZIP=~/Downloads/augurics_results_a.zip CHALLENGE
 (rename the two downloaded files first if they land with the same
 default name -- Kaggle doesn't namespace them by notebook.)
 
-## Session-length: split into two notebooks, not one
+## Session-length: real measured numbers, not the pre-launch estimate
 
-Stated before launching, per instruction -- and it changes the plan:
+The pre-launch estimate below this line (kept in git history, not
+here) assumed ~2.6-2.9h/fold based on local, pre-refactor timing. The
+first real Kaggle launch replaced that guess with a measurement:
 
-**Comparator alone is already close to the 12-hour ceiling.** The
-pre-refactor estimate was ~2.6-2.9h/fold x 4 folds = **10.4-11.6h**,
-plus fold 1's bounded NUTS spot-check and predictive-agreement check
-(~5-15 min more, based on the 332s measured at 182-series/113k-row
-scale, extrapolated to the bounded 100k-row cap). The indexed-
-categorical refactor should not have made ADVI slower (gather ops
-replace dense matmuls), but there is no fresh measurement at real
-fold-1 scale post-refactor -- the estimate carries that uncertainty
-forward. Either way, there is little to no headroom left in the same
-session for the challenger's 48 fits on top.
+**Fold 1's real wall time was 38,308.3s = 10.64h** (`fit_seconds`
+32,967.6s / 9.16h including the bounded NUTS spot-check;
+`predict_seconds` 5,237.5s / 1.45h for `_predict_all` over the full
+26,304-series holdout population) -- see `comparator_evidence.md` §8.
+This is **~3.5-4x slower than assumed**, almost certainly because
+Kaggle's CPU-only runtime (2 vCPU) is markedly weaker for this
+workload than the development laptop's extrapolation assumed. There is
+no headroom for more than one comparator fold per 12h session, full
+stop -- confirmed the hard way when the first run's fold 2 started,
+cached its fold frames, and was ceiling-cancelled mid-fit with zero
+partial credit.
 
-**Challenger timing is genuinely unverified** -- no real-fold-scale
-LightGBM fit has been timed (only tiny synthetic data locally, which
-says nothing about wall time at 48M rows). Gradient boosting is
-typically much faster than ADVI per fit, but "typically" is not a
-number.
+**Comparator: one fold per commit, mandatory.** `run_comparator_batch
+--fold-id N` (Cell 4, above) plus the session-budget guard
+(`check_session_budget`, `engine/backtest/run_comparator_batch.py`)
+enforce this going forward -- the guard refuses loud, before starting
+a fit, if the projected time (conservatively, fold 1's full 10.6h,
+applied to every fold regardless of NUTS) would not fit the session's
+remaining budget minus 30 minutes.
 
-**Recommendation: two separate notebook commits, not one "Save & Run
-All" spanning both.**
-
-1. **Notebook A** -- cells 1-4 (clone, ingest+reconcile, test, comparator
-   4 folds). Commit and let it run; expect close to the full 12h.
-2. **Notebook B** -- cells 1-3 again (fresh session, re-ingest is cheap
-   -- it's a few DuckDB queries over already-attached data, not a
-   multi-hour operation) + cell 5 (challenger grid) + cell 6 (package).
-   **Before committing to the full run**, do a bounded first check:
-   run combo 0/fold 1 alone (`python -m engine.backtest.
-   run_challenger_one_fold --fold-id 1 --combo-index 0 --out /tmp/probe.parquet`)
-   and read its printed wall time. Multiply by 48 for a real estimate
-   of the full grid's wall time before committing to "Save & Run All"
-   on the rest -- the same verify-before-committing discipline as
-   everything else in this project, not a guess.
-
-If Notebook B's extrapolated total exceeds ~10h, split the grid itself
-at fold boundaries (e.g. folds 1-2 in one commit, folds 3-4 in
-another) -- `run_challenger_batch.py`'s per-(fold,combo) resumability
-means a partial run is never wasted; a subsequent commit just skips
-what already has a result file.
+**Challenger: still genuinely unverified.** No real-fold-scale
+LightGBM fit has been timed. Notebook B's committed version already
+has the probe-first structure (Cell 5, above: single fold/combo, `x48`
+extrapolation, hard `assert est_hours <= 10`) -- read its printed
+extrapolation before ever running the full-grid cell. If the
+extrapolation exceeds 10h, split the grid by fold (12 fits/commit)
+rather than attempt all 48 in one session.
