@@ -106,6 +106,17 @@ run -- if something about the Kaggle environment differs (a wheel that
 built differently, a library version mismatch), this is where it
 surfaces, not mid-fold.
 
+**Notebook B only: this cell is merged with the probe (see Cell 5)
+into one cell, not kept separate.** Notebook B's session died twice,
+reproducibly, right after this cell's `make test` completed and before
+the next cell started -- with `git clone`, ingest, and the full test
+suite all having succeeded both times, ruling out a Kaggle-secret/auth
+explanation. Whether the death is tied to the cell BOUNDARY itself or
+to elapsed time (~11-12 min in) is unresolved; merging removes the
+boundary as a variable and shifts the probe's start earlier, which the
+log will show either way. See Cell 5 for the merged content and
+`KNOWN_ISSUES.md` for the full investigation.
+
 ## Cell 4 — Notebook A only: comparator, ONE fold per commit
 
 **Real fold-1 timing on Kaggle was 10.64h (comparator_evidence.md §8)
@@ -126,7 +137,7 @@ SESSION_STARTED_AT = time.time()  # capture as close to session start as practic
                                    # ideally move this line to Cell 1 instead; kept
                                    # here for a single copy-paste block
 
-FOLD_ID = 2  # bump this each commit: 2, then 3, then 4
+FOLD_ID = 3  # bump this each commit: 2 (done), 3 (this one), then 4
 
 result = os.system(
     f"python -m engine.backtest.run_comparator_batch "
@@ -155,23 +166,45 @@ one fold's worth of fitting.
 ## Cell 5 — Notebook B only: challenger, 4 folds x the pre-registered 12-combo grid
 
 **Mandatory: the single-combo probe (below) must run and its
-extrapolation must be read BEFORE this cell runs.** Notebook B's
-committed version already has this structure -- a probe cell (single
-fold/combo, extrapolated x48, hard `assert est_hours <= 10`) placed
-immediately before this one. If relaunching, the relaunch commit runs
-ONLY through the probe cell (comment out or remove this cell and Cell
-6 for that commit); only commit again with this cell re-enabled once
-the probe's extrapolation is read and confirmed to fit the session.
+extrapolation must be read BEFORE this cell runs.**
+
+**Merged with Cell 3 (`make test`), not a separate cell.** Notebook
+B's session died twice, reproducibly, right at this exact cell
+boundary -- after `make test` completed, before the probe (originally
+a separate next cell) ever started -- with no traceback either time.
+`git clone`, ingest, and the full test suite succeeded both times, so
+this is not a Kaggle-secret/auth failure. Whether the actual cause is
+the cell transition itself or something time-based (~11-12 minutes in)
+is still unresolved (see `KNOWN_ISSUES.md`); merging removes the
+boundary as a variable, and the probe now starts about a minute
+earlier, which the log will show either way if the real cause is
+purely elapsed time.
+
+**The probe's timing line is written into the repo tree, not just
+printed to stdout**, so even a post-probe cancel leaves the number
+retrievable via the raw-tree pull fallback (`make pull-kaggle` /
+`validate_kaggle.py`) -- a hard kill can end a session with zero
+further kernel-log lines, so stdout alone is not reliable insurance.
 
 ```python
+result = os.system("make test")
+assert result == 0, "tests failed on this Kaggle environment -- do not proceed"
+
 import time
+from pathlib import Path
 
 t0 = time.time()
 result = os.system("python -m engine.backtest.run_challenger_one_fold --fold-id 1 --combo-index 0 --out /tmp/probe.parquet")
 wall = time.time() - t0
 assert result == 0, "probe failed -- see output above"
 est_hours = wall * 48 / 3600
-print(f"Probe wall time: {wall:.1f}s -- extrapolated full grid (48 fits): {est_hours:.1f} hours")
+timing_line = f"Probe wall time: {wall:.1f}s -- extrapolated full grid (48 fits): {est_hours:.1f} hours"
+print(timing_line)
+
+probe_log_path = Path("data/fold_cache/probe_timing.txt")
+probe_log_path.parent.mkdir(parents=True, exist_ok=True)
+probe_log_path.write_text(timing_line + "\n")
+
 assert est_hours <= 10, f"STOP: extrapolated {est_hours:.1f}h exceeds the 10h safety bound -- do not run the next cell, split the grid by fold instead"
 print("Under the 10h bound -- proceed to the full-grid cell.")
 ```

@@ -107,7 +107,10 @@ def _build_archive_from_raw_tree(output_dir: Path, raw_fold_cache: Path, kernel_
     against whatever raw tree `kaggle kernels output` actually
     captured -- comparator/results, challenger_grid, and only the
     lgbm_promo_v1 files from slow_baseline_results, never the whole
-    directory."""
+    directory. Also picks up probe_timing.txt (the challenger grid's
+    single-combo probe writes its timing line here, inside the repo
+    tree, precisely so it survives a session death that leaves no
+    schema-tracked result at all -- see KNOWN_ISSUES.md)."""
     staging = output_dir / "_raw_tree_staging"
     if staging.exists():
         shutil.rmtree(staging)
@@ -125,11 +128,15 @@ def _build_archive_from_raw_tree(output_dir: Path, raw_fold_cache: Path, kernel_
         for f in slow_baseline_src.glob("*lgbm_promo_v1*"):
             shutil.copy(f, dest / f.name)
 
+    probe_timing_src = raw_fold_cache / "probe_timing.txt"
+    if probe_timing_src.exists():
+        shutil.copy(probe_timing_src, staging / "probe_timing.txt")
+
     if not any(staging.iterdir()):
         raise KaggleOutputMissingError(
             f"{kernel_slug}: raw tree found at {raw_fold_cache} but it contained none "
             "of the expected result directories (comparator/results, challenger_grid, "
-            "slow_baseline_results) -- nothing to package"
+            "slow_baseline_results) or probe_timing.txt -- nothing to package"
         )
 
     archive_path = shutil.make_archive(str(output_dir / "augurics_results_from_raw_tree"), "zip", root_dir=staging)

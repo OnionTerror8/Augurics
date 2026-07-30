@@ -2,6 +2,40 @@
 
 Tracked but not yet fixed. Add new entries at the top.
 
+## OPEN: Notebook B dies reproducibly right after `make test`, cause unresolved (2026-07-30)
+
+Two consecutive Notebook B sessions (a fresh commit and a verified
+non-retry of the same commit) died at the identical point: `make
+test` completes successfully (224 passed both times -- environment,
+clone, and ingest all fine), and execution stops with **zero further
+kernel-log lines** before the next cell (originally a separate probe
+cell) ever starts. No traceback, no error, no partial output from the
+next cell.
+
+Ruled out:
+- **Kaggle secret/auth expiry** -- would fail in Cell 1 (`git clone`),
+  before ingest or tests could run. Both didn't.
+- **Concurrent CPU session limit** -- Kaggle's free-tier limit is 5
+  concurrent CPU sessions (verified via search); only 2 were ever
+  active (Notebook A + B together).
+- **A documented Kaggle "batch CPU session count" quota** exists (a
+  separate discussion thread references a cap of 5), but its reset
+  window and exact trigger condition could not be confirmed from
+  available documentation -- inconclusive, not ruled out.
+
+Hardening applied (not yet re-tested): merged `make test` and the
+probe into a single cell (removes the cell-boundary transition as a
+variable) and the probe's timing line is now written to
+`data/fold_cache/probe_timing.txt` inside the repo tree, not just
+printed to stdout -- so even a subsequent cancel at the same point
+leaves the number retrievable via the raw-tree pull fallback. If the
+merged cell still dies at the same ~11-12 minute mark, the cause is
+time-based, not boundary-based, and points toward an external
+(platform-side) cause outside this project's control.
+
+Not blocking the comparator: Notebook A's fold-cadence (`--fold-id`
+per commit) is independent of this and proceeds regardless.
+
 ## RESOLVED: first real Kaggle launch — fold 1 banked, fold 2 ceiling-cancelled, relaunch tooling added (2026-07-29)
 
 The first real launch of both notebooks (task 2.1/2.3) surfaced three

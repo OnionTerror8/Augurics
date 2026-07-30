@@ -124,3 +124,24 @@ def test_raw_tree_fallback_only_copies_lgbm_files_from_slow_baseline_results(tmp
         names = zf.namelist()
     assert any("fold1_lgbm_promo_v1.parquet" in n for n in names)
     assert not any("fold1_auto_ets.parquet" in n for n in names)
+
+
+def test_raw_tree_fallback_picks_up_probe_timing_alone(tmp_path):
+    """A probe-only run (Cell 4/5 disabled, or a session that died
+    before writing any schema-tracked result) still has something
+    retrievable: probe_timing.txt, written inside the repo tree
+    specifically to survive this case."""
+    raw_fold_cache = tmp_path / "augurics-engine" / "data" / "fold_cache"
+    raw_fold_cache.mkdir(parents=True)
+    (raw_fold_cache / "probe_timing.txt").write_text("Probe wall time: 42.0s -- extrapolated full grid (48 fits): 0.6 hours\n")
+
+    archive = check_kernel_output_has_result_archive(tmp_path, "onionterror8/notebook-b")
+    assert archive.exists()
+
+    import zipfile
+
+    with zipfile.ZipFile(archive) as zf:
+        names = zf.namelist()
+        content = zf.read("probe_timing.txt").decode()
+    assert "probe_timing.txt" in names
+    assert "0.6 hours" in content
