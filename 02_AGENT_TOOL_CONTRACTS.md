@@ -142,3 +142,4 @@ The agent knows the user's current tier context (see UX spec) and behaves accord
 - [ ] run_python_action catalogue table + three v1 actions registered
 - [ ] Scheduled anomaly scan (n8n) posting to Insights inbox
 - [ ] Red-team pass: agent cannot be prompted into uncatalogued actions or unapproved writes
+- [ ] The FastAPI layer treats "external platform" as a first-class client, not an afterthought: auth-scoped API keys per consumer (co-processor/headless-API modes, see `EXPORT_CONTRACTS.md`), not just session auth for the Augurics UI itself
