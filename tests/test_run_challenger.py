@@ -171,3 +171,112 @@ def _four_folds():
         Fold(fold_id=i, train_end=date(2020, i, 1), holdout_start=date(2020, i, 2), holdout_end=date(2020, i, 15))
         for i in range(1, 5)
     ]
+
+
+# --- --fold-id restriction + --finalize (session-constrained-host split) ---
+
+
+def test_run_with_fold_id_restricts_to_one_folds_combos(tmp_path):
+    from engine.backtest.run_challenger_batch import run
+
+    grid_dir = tmp_path / "grid"
+    results_dir = tmp_path / "results"
+    folds = _four_folds()
+    grid = {"combos": [{"num_leaves": 31}, {"num_leaves": 63}]}
+
+    with patch("engine.backtest.run_challenger_batch.load_lgbm_grid", return_value=grid), \
+         patch("engine.backtest.run_challenger_batch.dataset_bounds", return_value=(None, None)), \
+         patch("engine.backtest.run_challenger_batch.make_folds", return_value=folds), \
+         patch("engine.backtest.run_challenger_batch.subprocess.run") as mock_run:
+
+        def side_effect(cmd, **kwargs):
+            fold_id = int(cmd[cmd.index("--fold-id") + 1])
+            combo_index = int(cmd[cmd.index("--combo-index") + 1])
+            _write_combo_result(grid_dir / f"fold{fold_id}_combo{combo_index}.parquet", fold_id, combo_index, 0.6)
+            return MagicMock(returncode=0, stdout="ok", stderr="")
+
+        mock_run.side_effect = side_effect
+        run(grid_results_dir=grid_dir, results_dir=results_dir, fold_id=2)
+
+        called_fold_ids = {int(c.args[0][c.args[0].index("--fold-id") + 1]) for c in mock_run.call_args_list}
+        assert called_fold_ids == {2}
+        # no auto-selection: results dir stays empty, only fold 2's combos exist
+        assert not results_dir.exists() or not any(results_dir.iterdir())
+        assert not (grid_dir / "fold1_combo0.parquet").exists()
+
+
+def test_run_with_fold_id_does_not_autoselect_even_if_that_fold_completes(tmp_path):
+    """Auto-selection only happens for an unrestricted run (fold_id=None)
+    -- a --fold-id run never triggers it, even trivially, since other
+    folds' results are not guaranteed to exist yet."""
+    from engine.backtest.run_challenger_batch import run
+
+    grid_dir = tmp_path / "grid"
+    folds = _four_folds()
+    grid = {"combos": [{"num_leaves": 31}]}
+
+    with patch("engine.backtest.run_challenger_batch.load_lgbm_grid", return_value=grid), \
+         patch("engine.backtest.run_challenger_batch.dataset_bounds", return_value=(None, None)), \
+         patch("engine.backtest.run_challenger_batch.make_folds", return_value=folds), \
+         patch("engine.backtest.run_challenger_batch.subprocess.run") as mock_run, \
+         patch("engine.backtest.run_challenger_batch.select_best_combo_and_write_results") as mock_select:
+
+        def side_effect(cmd, **kwargs):
+            fold_id = int(cmd[cmd.index("--fold-id") + 1])
+            combo_index = int(cmd[cmd.index("--combo-index") + 1])
+            _write_combo_result(grid_dir / f"fold{fold_id}_combo{combo_index}.parquet", fold_id, combo_index, 0.6)
+            return MagicMock(returncode=0, stdout="ok", stderr="")
+
+        mock_run.side_effect = side_effect
+        run(grid_results_dir=grid_dir, results_dir=tmp_path / "results", fold_id=1)
+
+        mock_select.assert_not_called()
+
+
+def test_run_without_fold_id_still_autoselects(tmp_path):
+    from engine.backtest.run_challenger_batch import run
+
+    grid_dir = tmp_path / "grid"
+    results_dir = tmp_path / "results"
+    folds = _four_folds()
+    grid = {"combos": [{"num_leaves": 31}]}
+
+    with patch("engine.backtest.run_challenger_batch.load_lgbm_grid", return_value=grid), \
+         patch("engine.backtest.run_challenger_batch.dataset_bounds", return_value=(None, None)), \
+         patch("engine.backtest.run_challenger_batch.make_folds", return_value=folds), \
+         patch("engine.backtest.run_challenger_batch.subprocess.run") as mock_run:
+
+        def side_effect(cmd, **kwargs):
+            fold_id = int(cmd[cmd.index("--fold-id") + 1])
+            combo_index = int(cmd[cmd.index("--combo-index") + 1])
+            _write_combo_result(grid_dir / f"fold{fold_id}_combo{combo_index}.parquet", fold_id, combo_index, 0.6)
+            return MagicMock(returncode=0, stdout="ok", stderr="")
+
+        mock_run.side_effect = side_effect
+        run(grid_results_dir=grid_dir, results_dir=results_dir, fold_id=None)
+
+        assert (results_dir / "fold1_lgbm_promo_v1.parquet").exists()
+        assert (results_dir / "fold4_lgbm_promo_v1.parquet").exists()
+
+
+def test_finalize_flag_selects_without_launching_any_fits(tmp_path, monkeypatch):
+    import engine.backtest.run_challenger_batch as batch_module
+
+    grid_dir = tmp_path / "grid"
+    results_dir = tmp_path / "results"
+    grid_dir.mkdir()
+    for fold_id in (1, 2, 3, 4):
+        _write_combo_result(grid_dir / f"fold{fold_id}_combo0.parquet", fold_id, 0, 0.6)
+
+    folds = _four_folds()
+    monkeypatch.setattr(batch_module, "GRID_RESULTS_DIR", grid_dir)
+    monkeypatch.setattr(batch_module, "RESULTS_DIR", results_dir)
+
+    with patch("engine.backtest.run_challenger_batch.dataset_bounds", return_value=(None, None)), \
+         patch("engine.backtest.run_challenger_batch.make_folds", return_value=folds), \
+         patch("engine.backtest.run_challenger_batch.subprocess.run") as mock_run, \
+         patch("sys.argv", ["run_challenger_batch", "--finalize"]):
+        batch_module.main()
+        mock_run.assert_not_called()
+
+    assert (results_dir / "fold1_lgbm_promo_v1.parquet").exists()
