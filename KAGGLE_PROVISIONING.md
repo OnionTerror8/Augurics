@@ -29,21 +29,38 @@ disappoints in practice; this is the current preferred path.
 
 **Before every "Save & Run All", re-verify the `GITHUB_TOKEN` secret is
 attached to THAT notebook** (Add-ons -> Secrets -> toggle ON for this
-notebook), not just that it exists somewhere in your account. Secret
-attachment can lapse between notebook versions -- pushing a new
-version does not guarantee a previously-attached secret stays
-attached -- and our token is a 7-day fine-grained GitHub PAT, so it
-also expires outright on its own schedule and needs regenerating
-periodically. The failure mode either way is the same: Cell 1's
-`git clone` (via `UserSecretsClient().get_secret("GITHUB_TOKEN")`)
-raises an immediate `ConnectionError` (or an auth failure from git)
-within seconds of the run starting -- fast, not subtle, but easy to
-mistake for something else if you're only watching for the batch
-cells' output hours later. This is the most plausible explanation for
-Notebook B's earlier unexplained early stop (see `KNOWN_ISSUES.md`):
-a silent, fast Cell 1 failure looks identical from the outside to "the
-run stopped early with no error in the log I was checking" if you
-weren't watching the very start of that particular run.
+notebook), not just that it exists somewhere in your account. This is
+not a hypothetical -- **confirmed**, not just plausible: both
+notebooks failed with an identical `ConnectionError` (`HTTPError: HTTP
+Error 400: Bad Request` from `UserSecretsClient().get_secret(...)`)
+immediately after a `kaggle kernels push` from the CLI, and both
+required manually re-toggling the secret ON before they would run
+again. **`kaggle kernels push` from the CLI appears to detach a
+notebook's secrets** (or at least does not preserve the attachment
+reliably) -- confirmed by direct observation, not fully explained.
+Our token is also a 7-day fine-grained GitHub PAT, so it expires
+outright on its own schedule regardless and needs regenerating
+periodically -- a second, independent reason the same failure can
+recur.
+
+**Consequence, stronger than first stated: `kaggle kernels push` is
+banned as a deployment method, full stop -- not just "prefer the UI
+for the trigger."** `kaggle kernels push` has no "upload without
+running" mode (`kaggle kernels push --help` confirms no such flag
+exists) -- every push immediately auto-runs the kernel, so there is no
+way to use the CLI to *prepare* a version without also triggering the
+exact launch this section says to avoid. Editing a notebook's cells
+must happen by pasting into the Kaggle UI editor directly, and
+launching is "Save & Run All" from that same editor, with the secret
+toggle re-checked immediately before clicking it. The `kaggle` CLI's
+role in this workflow is retrieval and status only (`kaggle kernels
+output`, `kaggle kernels status`, both wrapped by `make pull-kaggle`)
+-- never `kaggle kernels push`.
+
+Cell 1 below now fails gracefully instead of surfacing a raw
+traceback: it catches any exception from `get_secret` and exits with
+one instruction line naming the toggle path, rather than a multi-frame
+`ConnectionError`/`HTTPError` stack that's easy to skim past.
 
 Everything below is cell content to paste into that notebook, in order.
 
@@ -53,7 +70,14 @@ Everything below is cell content to paste into that notebook, in order.
 import os
 from kaggle_secrets import UserSecretsClient
 
-token = UserSecretsClient().get_secret("GITHUB_TOKEN")
+try:
+    token = UserSecretsClient().get_secret("GITHUB_TOKEN")
+except Exception:
+    raise SystemExit(
+        "Secret not attached: open Add-ons -> Secrets and toggle GITHUB_TOKEN "
+        "on for this notebook, then re-run."
+    ) from None
+
 os.system(f"git clone https://{token}@github.com/OnionTerror8/Augurics.git /kaggle/working/augurics-engine")
 os.chdir("/kaggle/working/augurics-engine")
 os.system("pip install -e . -q")

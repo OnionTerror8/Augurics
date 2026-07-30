@@ -2,6 +2,51 @@
 
 Tracked but not yet fixed. Add new entries at the top.
 
+## CONFIRMED: `kaggle kernels push` detaches notebook secrets; UI-only launch adopted (2026-07-30)
+
+Both notebooks failed identically immediately after a `kaggle kernels
+push` (Notebook A v7, Notebook B v7): `UserSecretsClient().get_secret
+("GITHUB_TOKEN")` raised `ConnectionError` (root cause `HTTPError: HTTP
+Error 400: Bad Request`) at t≈10-11s, before `git clone` could even
+run. Both notebooks required the `GITHUB_TOKEN` secret to be manually
+re-toggled ON (Add-ons -> Secrets, in the Kaggle UI) before they would
+run again -- **confirmed** the secret had become detached, not merely
+plausible. This is very likely also the true explanation for
+Notebook B's two earlier "unexplained" mid-run deaths (see the
+`RESOLVED` entry below) rather than the cell-boundary/timing
+hypothesis that motivated the Cell-merge hardening -- though those
+specific runs did get past Cell 1 successfully, so the detachment (if
+that's what it was) would have had to happen mid-session, which is a
+different and stranger failure mode than a stale toggle at launch
+time. Not fully explained either way; recorded as observed, not
+theorised.
+
+Adopted going forward, stronger than first stated: `kaggle kernels
+push` is banned as a deployment method entirely, not just
+de-prioritised as the trigger -- it has no "upload without running"
+mode (confirmed via `kaggle kernels push --help`: no such flag
+exists), so every push both edits AND auto-launches in one step, with
+no way to separate the two. Cell edits now happen by pasting into the
+Kaggle UI editor directly; launching is "Save & Run All" from that
+editor, with the secret toggle re-checked immediately before it. The
+CLI's role is retrieval/status only (`kaggle kernels output`, `kaggle
+kernels status`, both wrapped by `make pull-kaggle`) -- see
+`KAGGLE_PROVISIONING.md`.
+
+Cell 1 in both notebooks now fails gracefully on any `get_secret`
+exception (`raise SystemExit(...) from None`) instead of surfacing the
+raw `ConnectionError`/`HTTPError` traceback -- one instruction line
+naming the toggle path, not a multi-frame stack easy to skim past.
+
+Considered and deferred rather than fixed by removing the secret
+dependency entirely: making the repo public would let Cell 1 clone
+unauthenticated, eliminating this failure class outright, and was
+audited clean (no secrets, tokens, emails, or customer references
+anywhere in git history) -- but repo visibility is a product/business
+decision, not a technical one, and is tracked as an explicit open item
+in `PHASE1_KICKOFF.md`'s OPEN items table alongside the existing
+trademark/domain check, not decided here.
+
 ## OPEN: Notebook B dies reproducibly right after `make test`, cause unresolved (2026-07-30)
 
 Two consecutive Notebook B sessions (a fresh commit and a verified

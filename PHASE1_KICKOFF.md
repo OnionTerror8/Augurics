@@ -141,6 +141,7 @@ proceeding.
 | **RISK (Medium)** | M5's event structure is simpler than real promo data; a G3 pass here is necessary, not sufficient. Favorita validation follows in Phase 3. |
 | **RISK (Low)** | PyMC fit time on full M5. Mitigation: pooled fit per category, ADVI, documented. |
 | **OPEN** | Product/entity name check for "Augurics" (trademark/domain) before anything public. |
+| **OPEN** | Repo visibility / open-core question: `OnionTerror8/Augurics` audited clean for a public switch (no secrets/tokens/emails/customer references in git history) and doing so would remove a real Kaggle-secret failure class (see `KNOWN_ISSUES.md`) and restore the GitHub Actions compute option -- but visibility is a product/business decision, deliberately deferred here, not decided by default. |
 | **NEXT AFTER EXIT REVIEW** | Phase 2: FastAPI + Supabase migration, agent loop, Lovable build sequence from the UX spec §5 — with the two-lens (Horizon/Instrument) architecture folded in. |
 
 ---
