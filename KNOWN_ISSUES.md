@@ -2,6 +2,40 @@
 
 Tracked but not yet fixed. Add new entries at the top.
 
+## RULED OUT (verified before launching): GitHub Codespaces cannot host a comparator fold (2026-07-30)
+
+Assessed as a parallel compute host for fold 4, alongside Kaggle.
+Verified via `gh api` and GitHub docs before launching anything, not
+assumed:
+
+- **Machine**: `standardLinux32gb` (4 cores, 16GB RAM) is available
+  for this repo -- clears the ~3.90GB fold-memory estimate with large
+  headroom. Not the blocker.
+- **Quota**: GitHub Free includes 120 core-hours/month; a 4-core
+  machine costs 4 core-hours/wall-hour, so ~30 wall-hours/month are
+  available -- a single ~10.6h fold comfortably fits within quota
+  (confirmed zero prior codespace usage on this account). Not the
+  blocker either.
+- **The real blocker: idle timeout.** The maximum configurable idle
+  timeout is **240 minutes (4 hours)** -- a hard ceiling for personal
+  accounts, not a default that can be raised further. Critically,
+  "terminal activity, either input or output" is what resets the
+  timer; CPU usage from a detached background process does NOT count.
+  The comparator's ADVI fit produces zero terminal output for its
+  entire ~9h duration (no progress bar, no interim logging) -- a
+  Codespace running the batch under tmux would almost certainly
+  auto-suspend around the 4-hour mark, mid-fit, losing all progress
+  (same zero-partial-credit failure mode as Kaggle's fold-2
+  ceiling-cancel, except triggered ~2.5x sooner).
+
+Fold timing (~10.6-10.8h, per folds 1 and 2's real measurements) is
+roughly 2.5x longer than Codespaces' hard timeout ceiling. Keeping a
+run alive would require an active keepalive mechanism pinging the
+connection continuously for the full duration -- a fragile,
+single-point-of-failure workaround, not a verified capability. Ruled
+out; the Kaggle route (`--fold-id` per commit, already in use for
+folds 2-3) remains the sole active path for the comparator.
+
 ## CONFIRMED: `kaggle kernels push` detaches notebook secrets; UI-only launch adopted (2026-07-30)
 
 Both notebooks failed identically immediately after a `kaggle kernels
