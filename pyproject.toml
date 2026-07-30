@@ -18,6 +18,7 @@ dependencies = [
     "kaggle",
     "pyyaml",
     "psutil",
+    "anthropic",
 ]
 
 [tool.hatch.build.targets.wheel]
